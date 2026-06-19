@@ -69,9 +69,12 @@ generator.
 ## Build & deploy
 
 ```bash
-./build.sh            # export Web preset → serve at :8000 w/ correct headers → open browser → optionally push to itch
-./build.sh --no-push  # just build + test locally, no upload prompt
+./build.sh            # export Web preset → push to itch via butler
+./build.sh --no-push  # export only (files land in builds/web/), no upload
 ```
+
+To play-test the web build locally instead, run it from the editor, or serve
+`builds/web/` with COOP/COEP headers (Godot 4 web needs them for SharedArrayBuffer).
 
 **Setup status:**
 - ✅ git initialized on `main`, remote → `git@github.com:kjbrown-sandbox/juniper-dev-gamejam.git`
