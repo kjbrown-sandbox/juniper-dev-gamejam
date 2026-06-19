@@ -16,7 +16,7 @@ GAME_SLUG="juniper-dev-gamejam"   # the game's URL slug (update if you rename th
 # ───────────────────────────────────────────────────────────────────────────
 ITCH_TARGET="${ITCH_USER}/${GAME_SLUG}:html5"
 
-# Flags: ./build.sh --no-push  (build + test locally, never prompt to upload)
+# Flags: ./build.sh --no-push  (export only, don't upload to itch)
 PUSH=1
 [[ "$1" == "--no-push" || "$1" == "-n" ]] && PUSH=0
 
@@ -56,94 +56,10 @@ fi
 mkdir -p builds/web
 echo "Exporting '$EXPORT_PRESET' preset..."
 "$GODOT" --headless --export-release "$EXPORT_PRESET" "$EXPORT_OUTPUT"
-
-echo ""
-echo "Starting local test server at http://localhost:8000"
-echo ""
-
-# Bail early if something is already on the port (e.g. a server orphaned by a
-# previous run that was SIGKILLed before its cleanup trap could fire).
-if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
-    STALE_PID=$(lsof -nP -tiTCP:8000 -sTCP:LISTEN 2>/dev/null | head -1)
-    echo "❌ Port 8000 is already in use (pid ${STALE_PID:-unknown})."
-    echo "   Kill it and re-run:  kill ${STALE_PID:-<pid>}"
-    exit 1
-fi
-
-# Godot 4 web exports need COOP/COEP headers to enable SharedArrayBuffer.
-python3 -c "
-import http.server, functools
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self):
-        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
-        self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
-        super().end_headers()
-
-s = http.server.HTTPServer(('', 8000), functools.partial(Handler, directory='builds/web'))
-s.serve_forever()
-" &
-SERVER_PID=$!
-
-# Tear the server down no matter how this script ends: normal exit, Ctrl+C
-# (SIGINT), kill (SIGTERM), or the terminal window being closed (SIGHUP).
-cleanup() {
-    if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-}
-on_signal() {
-    echo ""
-    echo "Interrupted — shutting down the local server and exiting."
-    cleanup
-    exit 130
-}
-trap cleanup EXIT
-trap on_signal INT TERM HUP
-
-# Wait until the socket is actually accepting connections before opening the
-# browser (Python needs ~0.5s to import + bind; opening too early = "connection
-# refused").
-echo "Waiting for server to come up..."
-for i in $(seq 1 50); do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo "❌ Server process exited before it could bind to port 8000."
-        wait "$SERVER_PID" 2>/dev/null || true
-        exit 1
-    fi
-    if curl -s -o /dev/null "http://localhost:8000/"; then
-        break
-    fi
-    sleep 0.2
-    if [ "$i" -eq 50 ]; then
-        echo "❌ Server did not become ready within 10s."
-        kill "$SERVER_PID" 2>/dev/null || true
-        exit 1
-    fi
-done
-echo "Server is up at http://localhost:8000"
-open "http://localhost:8000" 2>/dev/null || true
+echo "Export complete → $EXPORT_OUTPUT"
 
 if [ "$PUSH" -eq 0 ]; then
-    echo ""
-    echo "Build-only mode (--no-push). Server running at http://localhost:8000"
-    echo "Press Ctrl+C to stop."
-    while true; do sleep 1; done
-fi
-
-echo "Test the build in the browser."
-echo "  - Press Enter when done   → stops the server, then asks about pushing to itch"
-echo "  - Press Ctrl+C any time   → shuts the server down and exits (no push)"
-read -r
-
-cleanup
-
-echo ""
-read -p "Build looks good? Push to itch? [y/N] " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted. Build is still in builds/web/ if you want to inspect it."
+    echo "Export-only mode (--no-push). Files are in builds/web/."
     exit 0
 fi
 
