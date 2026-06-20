@@ -1,56 +1,71 @@
 extends Node2D
-# GRAY BOX — "Revolutions". Momentum feel + a dying-core economy. SPACE: nail the light
-# (the core PAYS core-power to create each one) to boost. Phase 1: do 5 laps on the
-# inner ring. Then a far outer ring unlocks where you harvest material squares to refuel
-# the core — but hauling cargo drags you down. Race a 50-lap countdown to win. F opens a
-# paused terminal to feed the core or buy upgrades. One file, all logic in _process, all
-# rendering in _draw. Disposable.
+# GRAY BOX — "Revolutions". Momentum feel + a dying-core economy across three rings.
+# SPACE: nail the light(s) (the core PAYS core-power per light) to boost. P1: 5 laps on
+# the inner ring. P2: a middle ring unlocks where you grab squares to refuel the core
+# (50 laps). P3: an outer ring unlocks with counter-orbiting asteroids — ram them 3x to
+# crack them for asteroid material; collect 500 to win. Laps are counted at the top tick.
+# Reaching the inner ring auto-opens a paused terminal to feed/upgrade (C closes). Disposable.
 
 # ── Rings ──────────────────────────────────────────────────
-@export var base_radius := 180.0       # inner ring (ring 0)
-@export var ring_gap := 300.0          # outer ring is far away so distance reads big
+@export var base_radius := 180.0
+@export var ring_gap := 300.0
 @export var planet_radius := 40.0
 @export var moon_radius := 12.0
-@export var traverse_time := 2.5        # s to glide between rings
-@export var traverse_cost := 25.0       # speed lost going OUT (half refunded going IN)
+@export var traverse_time := 2.0
+@export var traverse_cost := 25.0
 @export var view_margin := 0.80
 
 # ── Light / boost ──────────────────────────────────────────
 @export var gate_window := 0.22
-@export var light_delay := 1.0          # s after a hit before the next light spawns
-@export var light_cost := 1.0           # core power spent to spawn a light
-@export var start_speed := 150.0
-@export var min_speed := 80.0
+@export var light_delay := 1.0
+@export var light_cost := 1.0
+@export var light_ahead_min_deg := 30.0
+@export var light_ahead_max_deg := 180.0
+@export var start_speed := 200.0
+@export var min_speed := 0.0
+@export var death_speed := 50.0
+@export var stall_decay := 120.0
 @export var max_speed := 2500.0
-@export var boost_base := 45.0
+@export var boost_base := 60.0
 @export var combo_mult := 0.08
-@export var base_decay := 20.0
-@export var whiff_slow := 0.95
+@export var base_decay := 15.0
+@export var whiff_slow := 0.85
 @export var hitstop_time := 0.05
 
 # ── Core / materials / inventory ───────────────────────────
-@export var core_start := 20.0
-@export var core_cap := 99.0
-@export var feed_per_square := 5.0
-@export var material_max := 3
+@export var core_start := 15.0
+@export var core_cap := 15.0
+@export var feed_per_square := 7.0
+@export var material_max := 1
 @export var material_tol := 0.18
 @export var material_respawn_lo := 2.0
 @export var material_respawn_hi := 4.0
-@export var pickup_slow := 0.94         # speed kept when you scoop a square
-@export var square_decay := 18.0        # extra decay per carried square
+@export var pickup_slow := 1.0
+@export var square_decay := 10.0
+
+# ── Asteroids (ring 3 / outer) ─────────────────────────────
+@export var asteroid_max := 4
+@export var asteroid_radius := 16.0
+@export var asteroid_speed := 1.2       # rad/s, counter-orbiting (opposite the player)
+@export var asteroid_hits := 3          # rams to crack one
+@export var asteroid_hit_mult := 0.7    # speed kept when you ram one
+@export var asteroid_tol := 0.16        # rad window a ram registers
+@export var asteroid_hit_cd := 0.5      # s before the same rock can hit you again
 
 # ── Goal ───────────────────────────────────────────────────
 @export var p1_revs := 5
-@export var p2_revs := 50
-@export var cine_dur := 5.0
+@export var p2_revs := 20
+@export var p3_asteroids := 50
 
 # ── State ──────────────────────────────────────────────────
-var phase := "p1"        # p1 | cine | p2 | won
+var phase := "p1"        # p1 | p2 | p3 | stalling | dead | won
+var top_angle := -PI / 2.0
+var banner_text := ""
+var banner_timer := 0.0
 var angle := 0.0
 var speed := 0.0
 var combo := 0
 var revs_left := 0
-var rev_accum := 0.0
 var unlocked := 1
 var current_ring := 0
 var display_radius := 0.0
@@ -59,17 +74,18 @@ var move_from := 0
 var move_to := 0
 var move_t := 0.0
 var view_scale := 1.0
-var cine_t := 0.0
 
 var core := 0.0
-var core_visible := false
 var inventory := 0
+var asteroid_mats := 0
 
-var has_light := false
-var light_angle := 0.0
+var lights: Array = []   # angles (floats); up to light_count at once
+var light_count := 1
 var light_timer := 0.0
 
-var materials: Array = []   # { angle:float, active:bool, timer:float }
+var materials: Array = []   # angle floats (active squares on the middle ring)
+var asteroids: Array = []   # { angle, hits_left, cd }
+var maxsq_cost := 1
 var shop: Array = []
 var terminal_open := false
 
@@ -86,35 +102,37 @@ func _ready() -> void:
 
 
 func make_shop() -> Array:
-	# Only the reveal shows until bought; then the real upgrades appear.
-	if not core_visible:
-		return [{ "id": "reveal", "name": "Reveal core power", "cost": 1 }]
-	return [
-		{ "id": "inertia", "name": "Increase inertia (-square drag)", "cost": 2 },
-		{ "id": "boost",   "name": "Stronger light boost (+0.2 core/light)", "cost": 2 },
-		{ "id": "maxsq",   "name": "More squares at ring 2 (+1)", "cost": 3 },
+	var s: Array = [
+		{ "id": "inertia", "name": "Increase inertia (-square drag)", "cost": 2, "cur": "sq" },
+		{ "id": "boost",   "name": "Stronger light boost (+0.2 core/light)", "cost": 2, "cur": "sq" },
+		{ "id": "maxsq",   "name": "More squares (+1)", "cost": maxsq_cost, "cur": "sq" },
 	]
+	if light_count < 2:
+		s.append({ "id": "dual", "name": "Two light boosts at once", "cost": 1, "cur": "ast" })
+	return s
 
 
 func reset() -> void:
 	phase = "p1"
-	angle = 0.0
+	angle = top_angle
 	speed = start_speed
 	combo = 0
 	revs_left = p1_revs
-	rev_accum = 0.0
 	unlocked = 1
 	current_ring = 0
 	display_radius = ring_r(0)
 	moving = false
 	move_t = 0.0
-	cine_t = 0.0
+	banner_timer = 0.0
 	core = core_start
-	core_visible = false
 	inventory = 0
-	has_light = false
+	asteroid_mats = 0
+	lights.clear()
+	light_count = 1
 	light_timer = 0.0
 	materials.clear()
+	asteroids.clear()
+	maxsq_cost = 1
 	shop = make_shop()
 	terminal_open = false
 	trail.clear()
@@ -146,9 +164,8 @@ func frame_scale(r: float) -> float:
 
 
 func desired_scale() -> float:
-	if phase == "cine":
-		return frame_scale(ring_r(1)) if cine_t < cine_dur * 0.6 else frame_scale(ring_r(0))
-	return frame_scale(display_radius)
+	# Always frame the outermost unlocked ring, so each unlock zooms out and stays out.
+	return frame_scale(ring_r(unlocked - 1))
 
 
 func moon_world() -> Vector2:
@@ -167,42 +184,67 @@ func cur_decay() -> float:
 	return base_decay + inventory * square_decay
 
 
-# ── Light ──────────────────────────────────────────────────
-func aligned() -> bool:
-	return has_light and absf(wrapf(angle - light_angle, -PI, PI)) <= gate_window
+func crossed(target: float, a0: float, a1: float) -> bool:
+	# True if the moon swept past `target` this frame (small forward step).
+	var r0 := wrapf(target - a0, -PI, PI)
+	var r1 := wrapf(target - a1, -PI, PI)
+	return signf(r0) != signf(r1) and absf(r0) < 1.0 and absf(r1) < 1.0
 
 
-# ── Materials ──────────────────────────────────────────────
-func ensure_materials() -> void:
-	while materials.size() < material_max:
-		materials.append({ "angle": randf_range(-PI, PI), "active": false, "timer": randf_range(material_respawn_lo, material_respawn_hi) })
+# ── Lights ─────────────────────────────────────────────────
+func aligned_light() -> int:
+	for i in lights.size():
+		if absf(wrapf(angle - lights[i], -PI, PI)) <= gate_window:
+			return i
+	return -1
+
+
+func rand_ahead() -> float:
+	return wrapf(angle + deg_to_rad(randf_range(light_ahead_min_deg, light_ahead_max_deg)), -PI, PI)
+
+
+# ── Spawners ───────────────────────────────────────────────
+func refill_materials() -> void:
+	# A fresh finite batch; no respawn timer — you must return to the hub for more.
+	materials.clear()
+	for i in material_max:
+		materials.append(randf_range(-PI, PI))
+
+
+func ensure_asteroids() -> void:
+	while asteroids.size() < asteroid_max:
+		asteroids.append({ "angle": randf_range(-PI, PI), "hits_left": asteroid_hits, "cd": 0.0 })
 
 
 # ── Phase transitions ──────────────────────────────────────
 func on_revolution() -> void:
-	revs_left -= 1
-	if revs_left <= 0:
-		if phase == "p1":
-			phase = "cine"
-			cine_t = 0.0
-			unlocked = 2
-			has_light = false
-		elif phase == "p2":
-			revs_left = 0
-			phase = "won"
+	if phase == "p1":
+		revs_left -= 1
+		if revs_left <= 0:
+			unlock_ring(2, "p2")
+	elif phase == "p2":
+		revs_left -= 1
+		if revs_left <= 0:
+			unlock_ring(3, "p3")
 
 
-func end_cine() -> void:
-	phase = "p2"
-	revs_left = p2_revs
-	current_ring = 0
-	display_radius = ring_r(0)
-	ensure_materials()
+func unlock_ring(new_unlocked: int, next_phase: String) -> void:
+	# No cinematic pause — play continues; the camera just zooms out (and stays out).
+	unlocked = new_unlocked
+	phase = next_phase
+	banner_text = "RING %d UNLOCKED" % new_unlocked
+	banner_timer = 2.5
+	if next_phase == "p2":
+		revs_left = p2_revs
+		refill_materials()
+	elif next_phase == "p3":
+		refill_materials()
+		ensure_asteroids()
 
 
 # ── Sim ────────────────────────────────────────────────────
 func _process(delta: float) -> void:
-	if terminal_open or phase == "won":
+	if terminal_open or phase == "won" or phase == "dead":
 		queue_redraw()
 		return
 
@@ -212,13 +254,13 @@ func _process(delta: float) -> void:
 		sim = 0.0
 
 	if sim > 0.0:
-		if phase == "cine":
-			_tick_cine(sim)
+		if phase == "stalling":
+			_tick_stall(sim)
 		else:
 			_tick_play(sim)
 
-	# Juice timers.
 	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
+	banner_timer = maxf(0.0, banner_timer - delta)
 	shake = maxf(0.0, shake - delta * 5.0)
 	for p in particles:
 		p.pos += p.vel * delta
@@ -236,59 +278,79 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 
-func _tick_cine(sim: float) -> void:
-	# Keep revolving, no decay, camera handled by desired_scale().
-	angle = wrapf(angle + (speed / base_radius) * sim, -PI, PI)
-	trail.append(moon_world())
-	if trail.size() > 26:
-		trail.pop_front()
-	cine_t += sim
-	if cine_t >= cine_dur:
-		end_cine()
+func _tick_stall(sim: float) -> void:
+	speed = maxf(0.0, speed - stall_decay * sim)
+	display_radius = ring_r(current_ring)
+	angle = wrapf(angle + (speed / display_radius) * sim, -PI, PI)
+	_trail()
+	if speed <= 1.0:
+		phase = "dead"
 
 
 func _tick_play(sim: float) -> void:
 	speed = clampf(speed - cur_decay() * sim, min_speed, max_speed)
-	# Angular pace uses the FIXED base radius so timing feel is ring-independent.
-	var dang := (speed / base_radius) * sim
-	angle = wrapf(angle + dang, -PI, PI)
-
-	rev_accum += dang
-	if rev_accum >= TAU:
-		rev_accum -= TAU
-		on_revolution()
-		if phase != "p2" and phase != "p1":
-			return
-
-	# Ring glide.
+	if speed <= death_speed:
+		phase = "stalling"
+		return
+	# Ring glide first, so the radius we're on this frame drives the angular pace.
 	if moving:
 		move_t += sim / maxf(0.001, traverse_time)
 		if move_t >= 1.0:
 			move_t = 1.0
 			moving = false
 			current_ring = move_to
+			if current_ring == 0:
+				terminal_open = true   # auto-open the terminal on reaching the hub
+				refill_materials()     # fresh batch of squares each time you return
 		display_radius = lerpf(ring_r(move_from), ring_r(move_to), move_t)
 	else:
 		display_radius = ring_r(current_ring)
 
-	# Light: respawn after delay, costs core. No core -> stall (no spawn).
-	if not has_light:
+	# Angular pace = speed / CURRENT radius, so bigger rings sweep slower (feel slower).
+	var dang := (speed / display_radius) * sim
+	var a0 := angle
+	angle = wrapf(angle + dang, -PI, PI)
+	# Laps are counted when you cross the top tick.
+	if (phase == "p1" or phase == "p2") and crossed(top_angle, a0, angle):
+		on_revolution()
+
+	# Lights: respawn light_count of them after the delay, each costing core.
+	if lights.is_empty():
 		light_timer -= sim
-		if light_timer <= 0.0 and core >= light_cost:
-			core -= light_cost
-			light_angle = randf_range(-PI, PI)
-			has_light = true
+		if light_timer <= 0.0:
+			for n in light_count:
+				if core >= light_cost:
+					core -= light_cost
+					lights.append(rand_ahead())
 
-	# Materials (phase 2, outer ring) — only respawn timers here; you grab them with SPACE.
-	if phase == "p2":
-		ensure_materials()
-		for m in materials:
-			if not m.active:
-				m.timer -= sim
-				if m.timer <= 0.0:
-					m.active = true
-					m.angle = randf_range(-PI, PI)
+	# Asteroids on the outer ring (P3): counter-orbit; ram them on ring 2 (index).
+	if phase == "p3":
+		ensure_asteroids()
+		for ast in asteroids:
+			ast.angle = wrapf(ast.angle - asteroid_speed * sim, -PI, PI)
+			if ast.cd > 0.0:
+				ast.cd -= sim
+		if current_ring == 2:
+			for ast in asteroids:
+				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
+					speed = speed * asteroid_hit_mult
+					ast.cd = asteroid_hit_cd
+					ast.hits_left -= 1
+					shake = minf(1.8, shake + 0.5)
+					var ap := ring_point(ring_r(2), ast.angle)
+					for i in 8:
+						particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 220.0), "life": randf_range(0.2, 0.45) })
+					if ast.hits_left <= 0:
+						asteroid_mats += 1
+						popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
+						if asteroid_mats >= p3_asteroids:
+							phase = "won"
+		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
+	_trail()
+
+
+func _trail() -> void:
 	trail.append(moon_world())
 	if trail.size() > 26:
 		trail.pop_front()
@@ -302,26 +364,23 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 	if terminal_open:
 		match k:
-			KEY_F: terminal_open = false
-			KEY_C: feed_core()
-			KEY_1, KEY_2, KEY_3: buy(k - KEY_1)
+			KEY_C: terminal_open = false
+			KEY_F: feed_core()
+			KEY_1, KEY_2, KEY_3, KEY_4: buy(k - KEY_1)
 			KEY_R: reset()
 		return
 
+	var playing: bool = phase == "p1" or phase == "p2" or phase == "p3"
 	match k:
 		KEY_SPACE:
-			if phase == "p1" or phase == "p2":
+			if playing:
 				try_boost()
 		KEY_UP:
-			if phase == "p2":
+			if phase == "p2" or phase == "p3":
 				traverse(1)
 		KEY_DOWN:
-			if phase == "p2":
+			if phase == "p2" or phase == "p3":
 				traverse(-1)
-		KEY_F:
-			# Terminal only opens at the innermost ring.
-			if (phase == "p1" or phase == "p2") and current_ring == 0 and not moving:
-				terminal_open = true
 		KEY_R:
 			reset()
 
@@ -346,9 +405,7 @@ func nearest_material() -> int:
 	var best := -1
 	var bestd := material_tol
 	for i in materials.size():
-		if not materials[i].active:
-			continue
-		var d := absf(wrapf(angle - materials[i].angle, -PI, PI))
+		var d := absf(wrapf(angle - materials[i], -PI, PI))
 		if d < bestd:
 			bestd = d
 			best = i
@@ -356,10 +413,8 @@ func nearest_material() -> int:
 
 
 func acquire_material(i: int) -> void:
-	var m: Dictionary = materials[i]
-	var ma: float = m.angle
-	m.active = false
-	m.timer = randf_range(material_respawn_lo, material_respawn_hi)
+	var ma: float = materials[i]
+	materials.remove_at(i)
 	inventory += 1
 	speed = maxf(min_speed, speed * pickup_slow)
 	var mp := ring_point(ring_r(1), ma)
@@ -369,31 +424,36 @@ func acquire_material(i: int) -> void:
 
 
 func try_boost() -> void:
-	# On the outer ring, SPACE grabs a nearby square first.
-	if phase == "p2" and current_ring == 1:
+	if moving:
+		return   # mid-glide between rings: SPACE does nothing (no whiff penalty)
+	# On the middle ring, SPACE grabs a nearby square first.
+	if (phase == "p2" or phase == "p3") and current_ring == 1:
 		var mi := nearest_material()
 		if mi >= 0:
 			acquire_material(mi)
 			return
-	if not aligned():
+	var li := aligned_light()
+	if li < 0:
 		combo = 0
 		speed = maxf(min_speed, speed * whiff_slow)
 		shake = minf(1.5, shake + 0.2)
 		return
-	var q := 1.0 - absf(wrapf(angle - light_angle, -PI, PI)) / gate_window
+	var la: float = lights[li]
+	var q := 1.0 - absf(wrapf(angle - la, -PI, PI)) / gate_window
 	combo += 1
 	var gain := boost_base * (1.0 + combo * combo_mult) * (0.5 + 0.5 * q)
 	speed = minf(max_speed, speed + gain)
 	shake = minf(1.6, shake + 0.35 + 0.4 * q)
-	var lp := ring_point(display_radius, light_angle)
+	var lp := ring_point(display_radius, la)
 	for i in 12:
 		particles.append({ "pos": lp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(110.0, 280.0), "life": randf_range(0.25, 0.55) })
 	flashes.append({ "pos": lp, "life": 0.35 })
 	popups.append({ "pos": lp, "text": ("PERFECT" if q > 0.75 else "x%d" % combo), "life": 0.7, "size": 18 })
 	if q > 0.75:
 		hitstop = hitstop_time
-	has_light = false
-	light_timer = light_delay
+	lights.remove_at(li)
+	if lights.is_empty():
+		light_timer = light_delay
 
 
 func feed_core() -> void:
@@ -407,19 +467,25 @@ func buy(i: int) -> void:
 		return
 	var item: Dictionary = shop[i]
 	var cost: int = item.cost
-	if inventory < cost:
+	var cur: String = item.cur
+	var have: int = inventory if cur == "sq" else asteroid_mats
+	if have < cost:
 		return
-	inventory -= cost
+	if cur == "sq":
+		inventory -= cost
+	else:
+		asteroid_mats -= cost
 	match item.id:
-		"reveal":
-			core_visible = true
 		"inertia":
 			square_decay = maxf(4.0, square_decay - 5.0)
 		"boost":
 			boost_base += 12.0
 			light_cost += 0.2
 		"maxsq":
-			material_max = mini(6, material_max + 1)
+			material_max = mini(10, material_max + 1)
+			maxsq_cost += 2
+		"dual":
+			light_count = 2
 	shop = make_shop()
 
 
@@ -440,34 +506,54 @@ func _draw() -> void:
 			sc.a = (t - 0.30) * 0.5
 			draw_line(c + d0 * r0, c + d0 * (r0 + 50.0 + t * 70.0), sc, 2.0)
 
-	# Rings (unlocked solid; next ring faint teaser).
+	# Rings, each with a tick mark at the top (the lap line).
+	var topd := Vector2(cos(top_angle), sin(top_angle))
 	for i in unlocked:
-		draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, Color(0.24, 0.24, 0.32), 2.0)
-	if unlocked < 2:
-		draw_arc(c, ring_r(1) * z, 0.0, TAU, 96, Color(0.15, 0.15, 0.19), 1.0)
+		var rr := ring_r(i) * z
+		draw_arc(c, rr, 0.0, TAU, 96, Color(0.24, 0.24, 0.32), 2.0)
+		draw_line(c + topd * (rr - 11.0), c + topd * (rr + 11.0), Color(0.9, 0.85, 0.4), 3.0)
 
-	# Planet + revolutions-remaining counter.
+	# Planet + center counter.
 	draw_circle(c, planet_radius * z, Color(0.40, 0.40, 0.48))
-	draw_string(font, c + Vector2(-60, 10), str(revs_left), HORIZONTAL_ALIGNMENT_CENTER, 120, 38, Color(1, 1, 1))
-	draw_string(font, c + Vector2(-60, 30), "LAPS LEFT", HORIZONTAL_ALIGNMENT_CENTER, 120, 11, Color(0.7, 0.7, 0.78))
+	var big := str(asteroid_mats) if phase == "p3" or phase == "won" else str(revs_left)
+	var label := "ASTEROIDS" if phase == "p3" or phase == "won" else "LAPS LEFT"
+	draw_string(font, c + Vector2(-60, 10), big, HORIZONTAL_ALIGNMENT_CENTER, 120, 38, Color(1, 1, 1))
+	draw_string(font, c + Vector2(-60, 30), label, HORIZONTAL_ALIGNMENT_CENTER, 120, 11, Color(0.7, 0.7, 0.78))
 
-	# Materials (outer ring squares).
-	for m in materials:
-		if not m.active:
-			continue
-		var ma: float = m.angle
+	# Core health bar beneath the planet.
+	var cbw := 120.0
+	var cby := c.y + planet_radius * z + 14.0
+	var cbx := c.x - cbw * 0.5
+	var cfrac := clampf(core / core_cap, 0.0, 1.0)
+	draw_rect(Rect2(cbx, cby, cbw, 9.0), Color(0.12, 0.12, 0.15))
+	draw_rect(Rect2(cbx, cby, cbw * cfrac, 9.0), Color(0.85, 0.3, 0.3).lerp(Color(0.3, 0.85, 0.45), cfrac))
+	draw_string(font, Vector2(cbx, cby + 24.0), "CORE %d" % int(core), HORIZONTAL_ALIGNMENT_CENTER, cbw, 12, Color(0.9, 0.9, 0.95))
+
+	# Materials (middle ring squares) — finite batch, refilled at the hub.
+	for i in materials.size():
+		var ma: float = materials[i]
 		var mp := c + ring_point(ring_r(1), ma) * z
 		var msz := 11.0 * z
 		draw_rect(Rect2(mp - Vector2(msz, msz) * 0.5, Vector2(msz, msz)), Color(0.4, 0.85, 0.95))
 
-	# Light on the current ring.
-	if has_light:
+	# Asteroids (outer ring) with a remaining-hits number.
+	for ast in asteroids:
+		var aa: float = ast.angle
+		var hl: int = ast.hits_left
+		var ap := c + ring_point(ring_r(2), aa) * z
+		draw_circle(ap, asteroid_radius * z, Color(0.85, 0.3, 0.25))
+		draw_string(font, ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
+
+	# Lights on the current ring.
+	for i in lights.size():
+		var ang: float = lights[i]
 		var lr := display_radius * z
-		var col := Color(0.3, 1.0, 0.45) if aligned() else Color(0.95, 0.85, 0.2)
+		var on: bool = absf(wrapf(angle - ang, -PI, PI)) <= gate_window
+		var col := Color(0.3, 1.0, 0.45) if on else Color(0.95, 0.85, 0.2)
 		var zone := col
 		zone.a = 0.22
-		draw_arc(c, lr, light_angle - gate_window, light_angle + gate_window, 14, zone, 8.0)
-		var dir := Vector2(cos(light_angle), sin(light_angle))
+		draw_arc(c, lr, ang - gate_window, ang + gate_window, 14, zone, 8.0)
+		var dir := Vector2(cos(ang), sin(ang))
 		draw_line(c + dir * (lr - 14.0), c + dir * (lr + 14.0), col, 4.0)
 
 	for fl in flashes:
@@ -496,39 +582,40 @@ func _draw() -> void:
 
 func _draw_hud(font: Font, spd_col: Color) -> void:
 	draw_string(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
-	var line2 := "COMBO x%d      SQUARES %d" % [combo, inventory]
-	if core_visible:
-		line2 += "      CORE %d" % int(core)
+	var line2 := "COMBO x%d      SQUARES %d      MAT %d" % [combo, inventory, asteroid_mats]
 	draw_string(font, Vector2(22, 84), line2, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.82, 0.82, 0.88))
-	if not has_light and core < light_cost and (phase == "p1" or phase == "p2"):
+	if lights.is_empty() and core < light_cost and (phase == "p1" or phase == "p2" or phase == "p3"):
 		draw_string(font, Vector2(22, 108), "CORE EMPTY — feed it (F) to relight", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(1, 0.5, 0.4))
 
-	var hint := "SPACE: light / grab square    F: terminal (inner ring)"
-	if phase == "p2":
+	var hint := "SPACE: light / grab square    (terminal auto-opens at the inner ring)"
+	if phase == "p2" or phase == "p3":
 		hint += "    UP/DOWN: switch ring"
 	hint += "    R: restart"
 	draw_string(font, Vector2(22, get_viewport_rect().size.y - 18), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.55, 0.55, 0.6))
 
 	var sc := screen_center()
 	if phase == "won":
-		draw_string(font, sc + Vector2(-160, -120), "YOU MADE IT — 50 LAPS!  (R)", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(0.5, 1, 0.6))
-	elif phase == "cine":
-		draw_string(font, sc + Vector2(-150, -120), "RING 2 UNLOCKED", HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(1, 1, 0.6))
+		draw_string(font, sc + Vector2(-180, -120), "YOU MADE IT — 500 ASTEROIDS!  (R)", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(0.5, 1, 0.6))
+	elif phase == "dead":
+		draw_string(font, sc + Vector2(-150, -120), "YOU STOPPED SPINNING  (R)", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(1, 0.4, 0.4))
+	elif banner_timer > 0.0:
+		draw_string(font, sc + Vector2(-150, -120), banner_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(1, 1, 0.6))
 
-	# Terminal overlay (paused).
 	if terminal_open:
 		var vp := get_viewport_rect().size
 		draw_rect(Rect2(0, 0, vp.x, vp.y), Color(0, 0, 0, 0.55))
-		var x := sc.x - 170.0
-		var y := sc.y - 110.0
-		draw_string(font, Vector2(x, y), "TERMINAL — SQUARES %d%s" % [inventory, ("   CORE %d" % int(core)) if core_visible else ""],
+		var x := sc.x - 180.0
+		var y := sc.y - 120.0
+		draw_string(font, Vector2(x, y), "TERMINAL — SQUARES %d   MAT %d   CORE %d" % [inventory, asteroid_mats, int(core)],
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 0.7))
-		draw_string(font, Vector2(x, y + 30), "C) Feed core: 1 square -> +%d" % int(feed_per_square),
+		draw_string(font, Vector2(x, y + 30), "F) Feed core: 1 square -> +%d" % int(feed_per_square),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.6, 0.95, 0.7) if inventory >= 1 else Color(0.5, 0.5, 0.5))
 		for i in shop.size():
 			var item: Dictionary = shop[i]
-			var afford: bool = inventory >= int(item.cost)
-			draw_string(font, Vector2(x, y + 56 + i * 24), "%d) %s — %d sq" % [i + 1, item.name, int(item.cost)],
+			var cur: String = item.cur
+			var have: int = inventory if cur == "sq" else asteroid_mats
+			var afford: bool = have >= int(item.cost)
+			draw_string(font, Vector2(x, y + 56 + i * 24), "%d) %s — %d %s" % [i + 1, item.name, int(item.cost), cur],
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(0.85, 0.95, 0.85) if afford else Color(0.5, 0.5, 0.5))
-		draw_string(font, Vector2(x, y + 56 + shop.size() * 24 + 10), "F: close",
+		draw_string(font, Vector2(x, y + 56 + shop.size() * 24 + 10), "C: close",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.6, 0.65))
