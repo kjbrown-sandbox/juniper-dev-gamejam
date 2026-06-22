@@ -53,6 +53,7 @@ rules
 
 ## Scope discipline (this is what kills solo jams)
 
+- **Target play length: 5–10 minutes of satisfying gameplay.** Most players stop around 5 min, so those first 5 must feel smooth, great, and beautiful. Don't push the experience much past 10 min — that's the player's time lost. Design the whole arc (intro → climax → win) to land inside that window.
 - **Vertical slice in 2 days, polish for 5.** One core mechanic. "Fun for 60 seconds" first, then make _that_ great.
 - **Avoid:** save systems, deep procgen, multiplayer, heavy content authoring, anything with a long content pipeline.
 - Rough day plan:
