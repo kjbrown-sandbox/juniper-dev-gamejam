@@ -13,7 +13,7 @@ extends Node2D
 @export var planet_grow_step := 14.0    # planet heals a step per ring sealed
 @export var moon_radius := 12.0
 @export var traverse_time := 2.0
-@export var traverse_cost := 300.0
+@export var traverse_cost := 200.0
 @export var view_margin := 0.80
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
 
@@ -28,16 +28,19 @@ extends Node2D
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
 @export var reveal_dur := 1.8           # s the camera zooms out to show the newly opened ring
-@export var gate_dist := 50.0           # px along the ring to accept a light (same on every ring)
+@export var gate_dist := 70.0           # px along the ring to accept a light (same on every ring)
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
 @export var light_cost := 1.0
+@export var dying_batches := 2          # final N light-batches (orange + slow) as the core dies
+@export var dying_delay_mult := 3.0     # those final lights respawn this many × slower
 @export var light_min_speed := 100.0              # at/below this speed the arc uses its "slow" range
 @export var light_tween_speed := 2000.0           # speed at which the arc range reaches its "fast" values
 @export var light_arc_slow := Vector2(15.0, 40.0)   # min/max degrees ahead at light_min_speed
 @export var light_arc_fast := Vector2(90.0, 270.0)  # min/max degrees ahead at light_tween_speed+
 @export var start_speed := 0.0
-@export var min_speed := 0.0
+@export var min_speed := 50.0           # speed never drops below this — you can't stall out
+@export var space_cd_time := 0.2        # min seconds between SPACE actions (anti-spam)
 @export var death_speed := 0.0
 @export var stall_decay := 120.0
 @export var max_speed := 4000.0
@@ -46,7 +49,7 @@ extends Node2D
 @export var combo_every := 3            # every Nth consecutive hit gives a combo boost
 @export var combo_boost_mult := 1.5     # that hit's boost is multiplied by this
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
-@export var base_decay := 25.0
+@export var base_decay := 15.0
 @export var whiff_slow := 0.85
 @export var hitstop_time := 0.05
 @export var seal_hitstop := 0.18
@@ -74,9 +77,10 @@ extends Node2D
 
 # ── Siphoner threats (frontier) ────────────────────────────
 @export var threat_radius := 14.0
+@export var enemy_hit_dist := 70.0      # proximity to SPACE-kill an enemy (clean, no penalty)
 @export var threat_speed := 90.0
 @export var threat_hp := 2
-@export var threat_drain := 1 
+@export var threat_drain :=  0.5
 @export var ram_radial_tol := 45.0
 @export var ram_ang_tol := 0.18
 @export var ram_hit_mult := 0.7
@@ -87,7 +91,7 @@ extends Node2D
 @export var beam_drain := 3.0           # core/s while firing
 
 # ── State ──────────────────────────────────────────────────
-var phase := "play"      # play | stalling | dead | won
+var phase := "play"      # play | dead | won
 var started := false     # the moon waits at the top until the first SPACE (launch)
 var dead_reason := ""
 var top_angle := -PI / 2.0
@@ -138,6 +142,7 @@ var hub_pending := false      # arrived at hub; shop opens once enemies are clea
 var asteroid_respawn := 0.0
 var square_respawn := 0.0
 var paused := false
+var space_cd := 0.0
 var shop_open := false
 var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, action, list, idx }
 
@@ -145,6 +150,7 @@ var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, act
 var has_horns := false
 var has_horns2 := false
 var has_blasters := false
+var has_material_boost := false
 var beam_on := false
 var shop_sq: Array = []
 var shop_bt: Array = []
@@ -187,7 +193,7 @@ var bought := {}   # node id -> 1 once owned
 # Economy tech tree. Each node reveals its children when bought; only buyable frontier shows.
 func econ_nodes() -> Array:
 	return [
-		{ "id":"esq",    "name":"More squares",            "req":"",       "cost":1,  "eff":"material", "cur":"sq", "desc":"Double squares on the ring" },
+		{ "id":"esq",    "name":"More squares",            "req":"",       "cost":1,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
 		{ "id":"ecore1", "name":"More core capacity",      "req":"esq",    "cost":2,  "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
 		{ "id":"einv1",  "name":"More square capacity",    "req":"esq",    "cost":2,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
 		{ "id":"ecore2", "name":"More core capacity II",   "req":"ecore1", "cost":4,  "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
@@ -203,20 +209,19 @@ func econ_nodes() -> Array:
 		{ "id":"einv3",  "name":"More square capacity III","req":"einv2",  "cost":8,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
 		{ "id":"ebig1",  "name":"Bigger squares",          "req":"einv2",  "cost":5,  "eff":"feed",     "cur":"sq", "desc":"Each square feeds +1 more core" },
 		{ "id":"ebig2",  "name":"Bigger squares II",       "req":"ebig1",  "cost":13, "eff":"feed",     "cur":"sq", "desc":"Each square feeds +1 more core" },
-		{ "id":"esq2",   "name":"More squares II",         "req":"einv1",  "cost":3,  "eff":"material", "cur":"sq", "desc":"Double squares on the ring" },
-		{ "id":"esq3",   "name":"More squares III",        "req":"esq2",   "cost":6,  "eff":"material", "cur":"sq", "desc":"Double squares on the ring" },
-		{ "id":"esq4",   "name":"More squares IV",         "req":"esq3",   "cost":12, "eff":"material", "cur":"sq", "desc":"Double squares on the ring" },
+		{ "id":"esq2",   "name":"More squares II",         "req":"einv1",  "cost":3,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
+		{ "id":"esq3",   "name":"More squares III",        "req":"esq2",   "cost":6,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
+		{ "id":"esq4",   "name":"More squares IV",         "req":"esq3",   "cost":12, "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
 	]
 
 
 func battle_nodes() -> Array:
 	return [
-		{ "id":"armor",    "name":"Armor",    "req":"",      "cost":5,  "eff":"armor",    "cur":"ast", "desc":"Keep more speed when ramming threats" },
-		{ "id":"horns",    "name":"Horns",    "req":"",      "cost":5,  "eff":"horns",    "cur":"ast", "desc":"Asteroids crack in 2 hits" },
-		{ "id":"horns2",   "name":"Horns II", "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids & enemies die in 1 hit, no slowdown" },
-		{ "id":"blasters", "name":"Blasters", "req":"",      "cost":10, "eff":"blasters", "cur":"ast", "desc":"Hold F: a beam that vaporizes threats" },
-		{ "id":"ast1",     "name":"More asteroids",    "req":"",     "cost":2, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
-		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1", "cost":5, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
+		{ "id":"horns",    "name":"Horns",          "req":"",      "cost":2,  "eff":"horns",    "cur":"ast", "desc":"Asteroids crack in 2 hits" },
+		{ "id":"horns2",   "name":"Horns II",       "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids die in 1 hit, no slowdown" },
+		{ "id":"matboost", "name":"Material boost", "req":"horns", "cost":5,  "eff":"matboost", "cur":"ast", "desc":"Press B: spend 1 square for a speed boost" },
+		{ "id":"ast1",     "name":"More asteroids",    "req":"horns", "cost":4,  "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
+		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1",  "cost":12, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
 	]
 
 
@@ -287,6 +292,7 @@ func reset() -> void:
 	has_horns = false
 	has_horns2 = false
 	has_blasters = false
+	has_material_boost = false
 	beam_on = false
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
@@ -400,6 +406,12 @@ func aligned_light() -> int:
 	return -1
 
 
+func light_dying() -> bool:
+	# True once the core can only make its final `dying_batches` of lights — they go orange
+	# and respawn slowly to show the planet dying. (Full core is never "dying".)
+	return unlocked >= 2 and core < core_cap and core <= float(dying_batches * light_count) * light_cost
+
+
 func rand_ahead() -> float:
 	# Arc distance ahead scales with speed: at speed 0 it's light_arc_slow degrees, rising
 	# to light_arc_fast at light_tween_speed; the random pick is within the lerped range.
@@ -489,11 +501,9 @@ func _process(delta: float) -> void:
 		sim = 0.0
 
 	if sim > 0.0:
-		if phase == "stalling":
-			_tick_stall(sim)
-		else:
-			_tick_play(sim)
+		_tick_play(sim)
 
+	space_cd = maxf(0.0, space_cd - delta)
 	reveal_timer = maxf(0.0, reveal_timer - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
@@ -521,17 +531,6 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 
-func _tick_stall(sim: float) -> void:
-	speed = maxf(0.0, speed - stall_decay * sim)
-	display_radius = ring_r(current_ring)
-	angle = wrapf(angle + (speed / display_radius) * sim, -PI, PI)
-	_trail()
-	if speed <= 1.0:
-		phase = "dead"
-		if dead_reason == "":
-			dead_reason = "YOU STOPPED SPINNING"
-
-
 func _tick_play(sim: float) -> void:
 	if not started:
 		return   # parked at the top until the first SPACE launches us
@@ -541,10 +540,6 @@ func _tick_play(sim: float) -> void:
 	if beam_on:
 		core = maxf(0.0, core - beam_drain * sim)
 		do_beam()
-
-	if speed <= death_speed:
-		phase = "stalling"
-		return
 
 	# Ring glide (radius drives angular pace).
 	if moving:
@@ -620,26 +615,29 @@ func _tick_play(sim: float) -> void:
 			ast.angle = wrapf(ast.angle - asteroid_speed * sim, -PI, PI)
 			if ast.cd > 0.0:
 				ast.cd -= sim
+		# Passing an asteroid on the ring slows you (always, on a cooldown) — damaging it
+		# requires SPACE (handled in try_boost). Horns II removes the slowdown.
 		if current_ring == 2:
 			for ast in asteroids:
 				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
-					if not has_horns2:        # Horns II shatters them with no momentum loss
+					if not has_horns2:
 						speed = speed * asteroid_hit_mult
 					ast.cd = asteroid_hit_cd
-					ast.hits_left -= 1
-					shake = minf(1.8, shake + 0.4)
-					var ap := ring_point(ring_r(2), ast.angle)
-					for i in 6:
-						particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
-					if ast.hits_left <= 0:
-						asteroid_mats += 1
-						asteroid_respawn = asteroid_respawn_delay   # wait before the next appears
-						popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
 	# Enemies start once ring 2 is unlocked (clock-driven waves).
 	if unlocked >= 2:
 		_tick_threats(sim)
+
+	# Core refills to full ONLY on the inner ring (home base) — unless any enemy is alive.
+	# (Other sealed rings still get reduced decay via cur_decay, but no replenish.)
+	if unlocked >= 2 and current_ring == 0 and not moving and threats.is_empty():
+		core = core_cap
+	# Death only when the planet's core is drained to nothing.
+	if unlocked >= 2 and core <= 0.0:
+		phase = "dead"
+		if dead_reason == "":
+			dead_reason = "THE PLANET'S CORE DIED"
 
 	# Back at the hub with all enemies cleared -> open the upgrade screen.
 	if hub_pending and not shop_open and current_ring == 0 and not moving and threats.is_empty():
@@ -692,25 +690,8 @@ func _tick_threats(sim: float) -> void:
 				t.latched = true
 		else:
 			core -= threat_drain * sim
-		# Slamming into an enemy MID-AIR (while traversing between rings) is a 1-hit KO.
-		if moving and moon_world().distance_to(ring_point(t.radius, t.angle)) < moon_radius + threat_radius:
-			t.hp = 0
-			shake = minf(1.8, shake + 0.5)
-			var cp := ring_point(t.radius, t.angle)
-			for i in 10:
-				particles.append({ "pos": cp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
-		# On a ring you hit them normally — a chip per ram (Horns II makes it a 1-hit KO).
-		elif t.hp > 0 and t.cd <= 0.0 and absf(display_radius - t.radius) < ram_radial_tol and absf(wrapf(angle - t.angle, -PI, PI)) < ram_ang_tol:
-			t.hp -= 1
-			if has_horns2:
-				t.hp = 0                                          # Horns II one-shots enemies
-			t.cd = threat_ram_cd
-			if not has_horns2:
-				speed = maxf(min_speed, speed * ram_hit_mult)
-			shake = minf(1.8, shake + 0.4)
-			var tp := ring_point(t.radius, t.angle)
-			for i in 8:
-				particles.append({ "pos": tp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(100.0, 240.0), "life": randf_range(0.2, 0.5) })
+		# Enemies are removed only by SPACE (no collision damage). If you don't clear them they
+		# just latch on the planet and drain the core.
 	threats = threats.filter(func(t): return t.hp > 0)
 
 	core = maxf(0.0, core)   # core can run dry (lights stop spawning), but it's not an instant loss
@@ -743,11 +724,22 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 	match k:
 		KEY_SPACE:
-			if phase == "play":
+			if phase == "play" and space_cd <= 0.0:
 				if not started:
 					started = true        # launch: kick off + the boost below
 					speed = start_speed
-				try_boost()
+				if not try_boost():
+					space_cd = space_cd_time   # only rate-limit a MISS; a hit lets you go again
+		KEY_B:
+			# Material boost: spend a carried square for a soft (base, unupgraded) speed boost.
+			if phase == "play" and has_material_boost and inventory > 0:
+				inventory -= 1
+				speed = minf(max_speed, speed + _base.boost_base)
+				var bp := moon_world()
+				shake = minf(1.6, shake + 0.3)
+				for i in 10:
+					particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(110.0, 240.0), "life": randf_range(0.25, 0.5) })
+				popups.append({ "pos": bp, "text": "MATERIAL BOOST", "life": 0.8, "size": 18 })
 		KEY_UP:
 			if phase == "play":
 				traverse(1)
@@ -806,18 +798,18 @@ func collect_square(i: int) -> void:
 	popups.append({ "pos": mp, "text": "+1", "life": 0.5, "size": 14 })
 
 
-func try_boost() -> void:
+func try_boost() -> bool:
+	# Returns true if the press connected with anything (square/light/enemy/asteroid).
 	var did := false
 	var mw := moon_world()
-	# Grab EVERY square within reach (up to the carry cap). Iterate back-to-front so removals
-	# don't shift the indices we haven't checked yet.
+	# Grab EVERY square within reach (up to the carry cap). Iterate back-to-front.
 	for i in range(materials.size() - 1, -1, -1):
 		var m: Dictionary = materials[i]
 		if mw.distance_to(ring_point(ring_r(1), m.angle)) < pickup_radius:
 			var sp := ring_point(ring_r(1), m.angle) + Vector2(0, -26)
 			if m.ready > 0.0:
 				popups.append({ "pos": sp, "text": "NOT READY", "life": 0.6, "size": 14 })
-				did = true   # not a whiff — attempting an unripe square doesn't punish you
+				did = true
 			elif inventory >= max_inventory:
 				popups.append({ "pos": sp, "text": "FULL INVENTORY", "life": 0.6, "size": 14 })
 				did = true
@@ -829,10 +821,41 @@ func try_boost() -> void:
 		if display_radius * absf(wrapf(angle - lights[i], -PI, PI)) <= gate_dist:
 			do_boost(i)
 			did = true
-	if not did and not moving:
-		combo = 0
-		speed = maxf(min_speed, speed * whiff_slow)
-		shake = minf(1.5, shake + 0.2)
+	# SPACE-hit EVERY enemy within reach (one HP per press; threat_hp presses to kill). A
+	# latched enemy (already on the inner ring) can't be hit mid-air — settle on a ring.
+	var hit_enemy := false
+	for t in threats:
+		if t.latched and moving:
+			continue
+		if mw.distance_to(ring_point(t.radius, t.angle)) < enemy_hit_dist:
+			t.hp -= 1
+			hit_enemy = true
+			did = true
+			var ep := ring_point(t.radius, t.angle)
+			shake = minf(1.8, shake + (0.5 if t.hp <= 0 else 0.25))
+			for i in (10 if t.hp <= 0 else 5):
+				particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
+	if hit_enemy:
+		threats = threats.filter(func(t): return t.hp > 0)
+	# SPACE-hit asteroids you're passing on ring 3 (one hit per press; the slowdown is passive).
+	if unlocked >= 3 and current_ring == 2:
+		var hit_ast := false
+		for ast in asteroids:
+			if absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
+				ast.hits_left -= 1
+				hit_ast = true
+				did = true
+				var ap := ring_point(ring_r(2), ast.angle)
+				shake = minf(1.8, shake + 0.3)
+				for i in 6:
+					particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
+				if ast.hits_left <= 0:
+					asteroid_mats += 1
+					asteroid_respawn = asteroid_respawn_delay
+					popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
+		if hit_ast:
+			asteroids = asteroids.filter(func(a): return a.hits_left > 0)
+	return did
 
 
 func do_boost(li: int) -> void:
@@ -854,15 +877,13 @@ func do_boost(li: int) -> void:
 		hitstop = hitstop_time
 	lights.remove_at(li)
 	if lights.is_empty():   # whole batch used — respawn after the delay
-		light_timer = light_delay + randf_range(-light_delay_jitter, light_delay_jitter)
+		var mult := dying_delay_mult if light_dying() else 1.0
+		light_timer = light_delay * mult + randf_range(-light_delay_jitter, light_delay_jitter)
 
 
 func feed_one() -> void:
-	# Core first; overflow becomes square-credits (the economy currency).
-	if core < core_cap:
-		core = minf(core_cap, core + feed_per_square)
-	else:
-		square_credits += overflow_mult
+	# Squares are pure currency now (the core refills automatically on sealed rings).
+	square_credits += overflow_mult
 
 
 func arrive_at_hub() -> void:
@@ -890,19 +911,18 @@ func buy(node: Dictionary) -> void:
 		asteroid_mats -= cost
 	bought[id] = 1
 	match node.eff:
-		"material":  material_max *= 2
+		"material":  material_max += 1
 		"inv":       max_inventory += 3
 		"core":      core_cap *= 2.0
 		"boost":     boost_base *= (1.0 + boost_up); light_cost += 1.0
 		"fast1":     light_delay = 1.5
 		"fast2":     light_delay = 1.0
 		"dual":      light_count = 2
-		"feed":      feed_per_square += 1.0
-		"armor":     ram_hit_mult = minf(0.95, ram_hit_mult + 0.05)
+		"feed":      overflow_mult += 1
 		"horns":     has_horns = true; asteroid_hits = 2
 		"horns2":    has_horns2 = true; asteroid_hits = 1
 		"asteroids": asteroid_max += 1
-		"blasters":  has_blasters = true
+		"matboost":  has_material_boost = true
 	make_shops()
 
 
@@ -928,7 +948,9 @@ func _draw() -> void:
 	for cp in comet:
 		var cpos: Vector2 = cp.pos
 		var clf: float = cp.life
-		var fa := clampf(clf / tail_life, 0.0, 1.0)
+		var f := clampf(clf / tail_life, 0.0, 1.0)
+		# Ease-out (quadratic): bright for most of the life, then a quick fade at the tail end.
+		var fa := 1.0 - (1.0 - f) * (1.0 - f)
 		var col := tail_color
 		col.a = fa
 		draw_circle(c + cpos * z, comet_dot * z * (0.4 + 0.6 * fa), col)
@@ -990,7 +1012,6 @@ func _draw() -> void:
 		var tcol := Color(1.0, 0.3, 0.85) if not latched else Color(1.0, 0.25, 0.25)
 		var rad := threat_radius * z
 		draw_colored_polygon([tp + Vector2(0, -rad), tp + Vector2(rad, 0), tp + Vector2(0, rad), tp + Vector2(-rad, 0)], tcol)
-		draw_string(font, tp + Vector2(-16, -rad - 4.0), str(tr.hp), HORIZONTAL_ALIGNMENT_CENTER, 32, 15, Color(1, 1, 1))
 
 	# Lights.
 	for i in lights.size():
@@ -998,7 +1019,8 @@ func _draw() -> void:
 		var lr := display_radius * z
 		var half_ang := gate_dist / maxf(1.0, display_radius)   # constant-distance window
 		var on: bool = display_radius * absf(wrapf(angle - ang, -PI, PI)) <= gate_dist
-		var col := Color(0.3, 1.0, 0.45) if on else Color(0.95, 0.85, 0.2)
+		var idle_col := Color(1.0, 0.5, 0.1) if light_dying() else Color(0.95, 0.85, 0.2)   # orange as the core dies
+		var col := Color(0.3, 1.0, 0.45) if on else idle_col
 		var zone := col
 		zone.a = 0.22
 		draw_arc(c, lr, ang - half_ang, ang + half_ang, 14, zone, 8.0)
