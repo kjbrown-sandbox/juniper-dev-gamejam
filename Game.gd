@@ -157,7 +157,26 @@ var shake := 0.0
 var hitstop := 0.0
 
 
+var _base := {}   # snapshot of upgrade-modified export bases (so reset honors the exports)
+
+
 func _ready() -> void:
+	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
+	# (reset() restores from here instead of hardcoded duplicates).
+	_base = {
+		"tail_life": tail_life,
+		"boost_base": boost_base,
+		"feed_per_square": feed_per_square,
+		"material_max": material_max,
+		"max_inventory": max_inventory,
+		"core_cap": core_cap,
+		"light_cost": light_cost,
+		"light_delay": light_delay,
+		"ram_hit_mult": ram_hit_mult,
+		"asteroid_hits": asteroid_hits,
+		"asteroid_max": asteroid_max,
+		"threat_hp": threat_hp,
+	}
 	reset()
 
 
@@ -194,7 +213,7 @@ func battle_nodes() -> Array:
 	return [
 		{ "id":"armor",    "name":"Armor",    "req":"",      "cost":5,  "eff":"armor",    "cur":"ast", "desc":"Keep more speed when ramming threats" },
 		{ "id":"horns",    "name":"Horns",    "req":"",      "cost":5,  "eff":"horns",    "cur":"ast", "desc":"Asteroids crack in 2 hits" },
-		{ "id":"horns2",   "name":"Horns II", "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids die in 1 hit, no slowdown" },
+		{ "id":"horns2",   "name":"Horns II", "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids & enemies die in 1 hit, no slowdown" },
 		{ "id":"blasters", "name":"Blasters", "req":"",      "cost":10, "eff":"blasters", "cur":"ast", "desc":"Hold F: a beam that vaporizes threats" },
 		{ "id":"ast1",     "name":"More asteroids",    "req":"",     "cost":2, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
 		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1", "cost":5, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
@@ -270,20 +289,20 @@ func reset() -> void:
 	has_blasters = false
 	beam_on = false
 	bought = {}
-	# restore upgrade-modified tunables to base (so restart is clean)
-	tail_life = 1.4
-	boost_base = 125.0
-	feed_per_square = 5.0
-	overflow_mult = 1
-	material_max = 1
-	max_inventory = 3
-	core_cap = 5.0
-	light_cost = 1.0
-	light_delay = 2.0
-	ram_hit_mult = 0.7
-	asteroid_hits = 3
-	asteroid_max = 1
-	threat_hp = 3
+	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
+	tail_life = _base.tail_life
+	boost_base = _base.boost_base
+	feed_per_square = _base.feed_per_square
+	material_max = _base.material_max
+	max_inventory = _base.max_inventory
+	core_cap = _base.core_cap
+	light_cost = _base.light_cost
+	light_delay = _base.light_delay
+	ram_hit_mult = _base.ram_hit_mult
+	asteroid_hits = _base.asteroid_hits
+	asteroid_max = _base.asteroid_max
+	threat_hp = _base.threat_hp
+	overflow_mult = 1   # pure runtime var, base is always 1
 	make_shops()
 	trail.clear()
 	particles.clear()
@@ -673,14 +692,25 @@ func _tick_threats(sim: float) -> void:
 				t.latched = true
 		else:
 			core -= threat_drain * sim
-		# Enemies are killed by slamming into them MID-AIR (while traversing between rings).
-		# Settled on a ring you can't ram them — you have to traverse into them.
+		# Slamming into an enemy MID-AIR (while traversing between rings) is a 1-hit KO.
 		if moving and moon_world().distance_to(ring_point(t.radius, t.angle)) < moon_radius + threat_radius:
 			t.hp = 0
 			shake = minf(1.8, shake + 0.5)
 			var cp := ring_point(t.radius, t.angle)
 			for i in 10:
 				particles.append({ "pos": cp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
+		# On a ring you hit them normally — a chip per ram (Horns II makes it a 1-hit KO).
+		elif t.hp > 0 and t.cd <= 0.0 and absf(display_radius - t.radius) < ram_radial_tol and absf(wrapf(angle - t.angle, -PI, PI)) < ram_ang_tol:
+			t.hp -= 1
+			if has_horns2:
+				t.hp = 0                                          # Horns II one-shots enemies
+			t.cd = threat_ram_cd
+			if not has_horns2:
+				speed = maxf(min_speed, speed * ram_hit_mult)
+			shake = minf(1.8, shake + 0.4)
+			var tp := ring_point(t.radius, t.angle)
+			for i in 8:
+				particles.append({ "pos": tp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(100.0, 240.0), "life": randf_range(0.2, 0.5) })
 	threats = threats.filter(func(t): return t.hp > 0)
 
 	core = maxf(0.0, core)   # core can run dry (lights stop spawning), but it's not an instant loss
