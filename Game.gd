@@ -18,7 +18,7 @@ extends Node2D
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
 
 # ── Tail / speed ───────────────────────────────────────────
-@export var tail_life := 1.6            # seconds a tail particle lingers; sealing = lap within this time
+@export var tail_life := 1.8            # seconds a tail particle lingers; sealing = lap within this time
 @export var feed_up := 5.0              # +50% of base feed per Bigger-squares level (10->15->20->25)
 @export var tail_color := Color(1.0, 0.85, 0.2)   # yellow comet tail
 @export var comet_emit_step := 0.04     # rad spacing between emitted tail particles
@@ -29,7 +29,7 @@ extends Node2D
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
 @export var reveal_dur := 1.8           # s the camera zooms out to show the newly opened ring
-@export var gate_dist := 70.0           # px along the ring to accept a light (same on every ring)
+@export var gate_dist := 105.0          # px along the ring to accept a light (same on every ring)
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
 @export var light_cost := 1.0
@@ -45,7 +45,7 @@ extends Node2D
 @export var death_speed := 0.0
 @export var stall_decay := 120.0
 @export var max_speed := 4000.0
-@export var boost_base := 125.0
+@export var boost_base := 100.0
 @export var boost_up := 0.5             # Boost-power upgrade multiplies boost_base by (1 + this)
 @export var combo_every := 3            # every Nth consecutive hit gives a combo boost
 @export var combo_boost_mult := 1.5     # that hit's boost is multiplied by this
@@ -61,7 +61,7 @@ extends Node2D
 @export var feed_per_square := 5.0
 @export var material_max := 1             # squares on the ring (doubles per upgrade)
 @export var square_ready_time := 1.0      # s a freshly-spawned square fades in before it's grabbable
-@export var pickup_radius := 90.0
+@export var pickup_radius := 135.0
 @export var deposit_interval := 0.12
 @export var suck_time := 0.45
 @export var max_inventory := 3          # most squares you can carry at once (doubles per upgrade)
@@ -73,15 +73,16 @@ extends Node2D
 @export var asteroid_speed := 1.2
 @export var asteroid_hits := 3
 @export var asteroid_hit_mult := 0.7
-@export var asteroid_tol := 0.16
+@export var asteroid_tol := 0.24
 @export var asteroid_hit_cd := 0.5
 
 # ── Siphoner threats (frontier) ────────────────────────────
 @export var threat_radius := 14.0
-@export var enemy_hit_dist := 70.0      # proximity to SPACE-kill an enemy (clean, no penalty)
+@export var enemy_hit_dist := 105.0     # proximity to SPACE-hit an enemy
+@export var enemy_contact_dist := 34.0  # proximity at which a passed enemy slows you (item 9)
 @export var threat_speed := 90.0
 @export var threat_hp := 2
-@export var threat_drain :=  0.5
+@export var threat_drain :=  0.75
 @export var ram_radial_tol := 45.0
 @export var ram_ang_tol := 0.18
 @export var ram_hit_mult := 0.7
@@ -122,8 +123,7 @@ var comet: Array = []     # tail particles: { pos:Vector2, life:float, cum:float
 var cum_angle := 0.0      # unwrapped accumulated rotation (drives the seal span)
 
 var core := 0.0
-var inventory := 0
-var square_credits := 0
+var inventory := 0        # carried squares = the economy wallet (capped by max_inventory)
 var asteroid_mats := 0
 var overflow_mult := 1    # credits per overflow square (+1 per Bigger-squares level)
 
@@ -152,6 +152,8 @@ var has_horns := false
 var has_horns2 := false
 var has_blasters := false
 var has_material_boost := false
+var has_ramming := false
+var has_vacuum := false
 var beam_on := false
 var shop_sq: Array = []
 var shop_bt: Array = []
@@ -203,7 +205,7 @@ func econ_nodes() -> Array:
 		{ "id":"ecore4", "name":"More core capacity IV",   "req":"ecore3", "cost":16, "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
 		{ "id":"efast1", "name":"Faster lights",           "req":"eb1",            "cost":6,  "eff":"fast1", "cur":"sq", "desc":"Lights respawn faster (1.5s)" },
 		{ "id":"efast2", "name":"Faster lights II",        "req":"efast1",         "cost":12, "eff":"fast2", "cur":"sq", "desc":"Lights respawn faster (1.0s)" },
-		{ "id":"edual",  "name":"Double lights",           "req":["efast1","eb2"], "cost":11, "eff":"dual",  "cur":"sq", "desc":"Two boost lights at once" },
+		{ "id":"edual",  "name":"Double lights",           "req":["efast1","eb2"], "cost":11, "mat":1, "eff":"dual",  "cur":"sq", "desc":"Two boost lights at once (+1 mat)" },
 		{ "id":"eb2",    "name":"Boost light II",          "req":"eb1",    "cost":10, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"eb3",    "name":"Boost light III",         "req":"eb2",    "cost":20, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"einv2",  "name":"More square capacity II", "req":"einv1",  "cost":4,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
@@ -221,6 +223,8 @@ func battle_nodes() -> Array:
 		{ "id":"horns",    "name":"Horns",          "req":"",      "cost":2,  "eff":"horns",    "cur":"ast", "desc":"Asteroids crack in 2 hits" },
 		{ "id":"horns2",   "name":"Horns II",       "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids die in 1 hit, no slowdown" },
 		{ "id":"matboost", "name":"Material boost", "req":"horns", "cost":5,  "eff":"matboost", "cur":"ast", "desc":"Press B: spend 1 square for a speed boost" },
+		{ "id":"ramming",  "name":"Ramming",       "req":"horns", "cost":3,  "eff":"ramming",  "cur":"ast", "desc":"Missed-SPACE enemy collisions deal 1 damage" },
+		{ "id":"vacuum",   "name":"Vacuum",        "req":"horns", "cost":3,  "eff":"vacuum",   "cur":"ast", "desc":"Auto-collect nearby squares, no SPACE needed" },
 		{ "id":"ast1",     "name":"More asteroids",    "req":"horns", "cost":4,  "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
 		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1",  "cost":12, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
 	]
@@ -270,7 +274,6 @@ func reset() -> void:
 	banner_timer = 0.0
 	core = core_start
 	inventory = 0
-	square_credits = 0
 	asteroid_mats = 0
 	lights.clear()
 	light_count = 1
@@ -294,6 +297,8 @@ func reset() -> void:
 	has_horns2 = false
 	has_blasters = false
 	has_material_boost = false
+	has_ramming = false
+	has_vacuum = false
 	beam_on = false
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
@@ -473,10 +478,6 @@ func try_seal() -> void:
 	banner_timer = 2.5
 	if unlocked == 2:
 		refill_materials()   # ring 2 opens with squares ready to grab
-		core = core_cap                  # the planet's core comes online (full)
-		enemy_active = true              # the enemy spawn-clock begins
-		threat_spawn_count = 0
-		threat_timer = enemy_interval(0)
 	if unlocked == 3:
 		ensure_asteroids()
 
@@ -529,11 +530,6 @@ func _process(delta: float) -> void:
 	for fl in flashes:
 		fl.life -= delta
 	flashes = flashes.filter(func(fl): return fl.life > 0.0)
-	for f in flying:
-		f.t += delta / maxf(0.01, suck_time)
-		if f.t >= 1.0:
-			feed_one()
-	flying = flying.filter(func(f): return f.t < 1.0)
 
 	queue_redraw()
 
@@ -600,6 +596,12 @@ func _tick_play(sim: float) -> void:
 					flashes.append({ "pos": bp, "life": 0.4 })
 					for n in 6:
 						particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(60.0, 140.0), "life": randf_range(0.2, 0.4) })
+		# Vacuum upgrade: auto-grab ready squares within reach, no SPACE needed.
+		if has_vacuum:
+			for i in range(materials.size() - 1, -1, -1):
+				var mv: Dictionary = materials[i]
+				if mv.ready <= 0.0 and inventory < max_inventory and moon_world().distance_to(ring_point(ring_r(1), mv.angle)) < pickup_radius:
+					collect_square(i)
 
 
 	# Lights spawn as a full batch once the previous batch is fully used; each costs 1 core.
@@ -633,22 +635,21 @@ func _tick_play(sim: float) -> void:
 					ast.cd = asteroid_hit_cd
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
-	# Enemies start once ring 2 is unlocked (clock-driven waves).
-	if unlocked >= 2:
-		_tick_threats(sim)
+	# Enemies run on the clock from launch (we're past the not-started early-return).
+	_tick_threats(sim)
 
-	# Core refills to full ONLY on the inner ring (home base) — unless any enemy is alive.
+	# Core refills to full ONLY on the inner ring (home base) — unless an enemy has reached it.
 	# (Other sealed rings still get reduced decay via cur_decay, but no replenish.)
-	if unlocked >= 2 and current_ring == 0 and not moving and threats.is_empty():
+	if current_ring == 0 and not moving and not core_under_attack():
 		core = core_cap
 	# Death only when the planet's core is drained to nothing.
-	if unlocked >= 2 and core <= 0.0:
+	if core <= 0.0:
 		phase = "dead"
 		if dead_reason == "":
 			dead_reason = "THE PLANET'S CORE DIED"
 
-	# Back at the hub with all enemies cleared -> open the upgrade screen.
-	if hub_pending and not shop_open and current_ring == 0 and not moving and threats.is_empty():
+	# Back at the hub with no enemy on the inner ring -> open the upgrade screen.
+	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack():
 		shop_open = true
 		hub_pending = false
 
@@ -677,6 +678,11 @@ func enemy_count(i: int) -> int:
 	return i / 4 + 1   # +1 enemy each full 4-spawn cycle
 
 
+func core_under_attack() -> bool:
+	# True while any enemy has reached (latched onto) the innermost ring.
+	return threats.any(func(t): return t.latched)
+
+
 func _tick_threats(sim: float) -> void:
 	# Spawn-clock: each time it drains, a wave of enemy_count() enemies spawns and the next
 	# interval is loaded (45/40/35/30 cycling, count rising every full cycle).
@@ -698,8 +704,18 @@ func _tick_threats(sim: float) -> void:
 				t.latched = true
 		else:
 			core -= threat_drain * sim
-		# Enemies are removed only by SPACE (no collision damage). If you don't clear them they
-		# just latch on the planet and drain the core.
+		# Passing an enemy slows you like an asteroid (on a cooldown). A successful SPACE that
+		# pass sets t.cd, so killing/hitting it skips the slow. With Ramming, a missed-SPACE
+		# collision still slows but chips 1 HP off the enemy.
+		if t.cd <= 0.0 and moon_world().distance_to(ring_point(t.radius, t.angle)) < enemy_contact_dist:
+			speed = maxf(min_speed, speed * asteroid_hit_mult)
+			t.cd = asteroid_hit_cd
+			shake = minf(1.8, shake + 0.3)
+			var cp := ring_point(t.radius, t.angle)
+			for i in 5:
+				particles.append({ "pos": cp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
+			if has_ramming:
+				t.hp -= 1
 	threats = threats.filter(func(t): return t.hp > 0)
 
 	core = maxf(0.0, core)   # core can run dry (lights stop spawning), but it's not an instant loss
@@ -736,6 +752,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				if not started:
 					started = true        # launch: kick off + the boost below
 					speed = start_speed
+					core = core_cap                 # the core is online from the first second
+					enemy_active = true             # and enemies start attacking immediately
+					threat_spawn_count = 0
+					threat_timer = enemy_interval(0)
 				if not try_boost():
 					space_cd = space_cd_time   # only rate-limit a MISS; a hit lets you go again
 		KEY_B:
@@ -799,7 +819,7 @@ func traverse(dir: int) -> void:
 func collect_square(i: int) -> void:
 	var ma: float = materials[i].angle
 	materials.remove_at(i)
-	inventory += 1
+	inventory = mini(max_inventory, inventory + overflow_mult)   # Bigger squares = +N wallet per grab
 	spawn_square()   # replacement appears immediately (not grabbable until it fades in)
 	var mp := ring_point(ring_r(1), ma)
 	flashes.append({ "pos": mp, "life": 0.3 })
@@ -829,20 +849,25 @@ func try_boost() -> bool:
 		if display_radius * absf(wrapf(angle - lights[i], -PI, PI)) <= gate_dist:
 			do_boost(i)
 			did = true
-	# SPACE-hit EVERY enemy within reach (one HP per press; threat_hp presses to kill). A
-	# latched enemy (already on the inner ring) can't be hit mid-air — settle on a ring.
+	# SPACE-hit EVERY enemy within reach. A still-flying enemy hit mid-air (while traversing)
+	# dies instantly; a latched enemy, or any hit while on a ring, takes one normal HP.
 	var hit_enemy := false
 	for t in threats:
-		if t.latched and moving:
-			continue
 		if mw.distance_to(ring_point(t.radius, t.angle)) < enemy_hit_dist:
-			t.hp -= 1
+			var midair: bool = moving and not t.latched
+			if midair:
+				t.hp = 0
+			else:
+				t.hp -= 1
+			t.cd = asteroid_hit_cd   # a successful hit suppresses the contact-slow this pass
 			hit_enemy = true
 			did = true
 			var ep := ring_point(t.radius, t.angle)
 			shake = minf(1.8, shake + (0.5 if t.hp <= 0 else 0.25))
 			for i in (10 if t.hp <= 0 else 5):
 				particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
+			if midair:
+				popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL BONUS", "life": 0.9, "size": 18 })
 	if hit_enemy:
 		threats = threats.filter(func(t): return t.hp > 0)
 	# SPACE-hit asteroids you're passing on ring 3 (one hit per press; the slowdown is passive).
@@ -889,17 +914,9 @@ func do_boost(li: int) -> void:
 		light_timer = light_delay * mult + randf_range(-light_delay_jitter, light_delay_jitter)
 
 
-func feed_one() -> void:
-	# Squares are pure currency now (the core refills automatically on sealed rings).
-	square_credits += overflow_mult
-
-
 func arrive_at_hub() -> void:
-	# Reaching the inner ring banks all carried squares, then opens the paused upgrade screen.
-	while inventory > 0:
-		inventory -= 1
-		feed_one()
-	hub_pending = unlocked >= 2   # shop opens once any enemies are cleared
+	# Carried squares ARE the wallet now (no banking) — just flag the shop to open.
+	hub_pending = unlocked >= 2   # shop opens once the inner ring is clear of enemies
 
 
 func buy(node: Dictionary) -> void:
@@ -909,14 +926,16 @@ func buy(node: Dictionary) -> void:
 	if not req_met(node.req):   # prerequisite not owned
 		return
 	var cur: String = node.cur
-	var have: int = square_credits if cur == "sq" else asteroid_mats
+	var have: int = inventory if cur == "sq" else asteroid_mats
 	var cost: int = node.cost
-	if have < cost:
+	var mat_cost: int = int(node.get("mat", 0))   # optional secondary cost (e.g. Double lights)
+	if have < cost or asteroid_mats < mat_cost:
 		return
 	if cur == "sq":
-		square_credits -= cost
+		inventory -= cost
 	else:
 		asteroid_mats -= cost
+	asteroid_mats -= mat_cost
 	bought[id] = 1
 	match node.eff:
 		"material":  material_max += 1
@@ -931,6 +950,8 @@ func buy(node: Dictionary) -> void:
 		"horns2":    has_horns2 = true; asteroid_hits = 1
 		"asteroids": asteroid_max += 1
 		"matboost":  has_material_boost = true
+		"ramming":   has_ramming = true
+		"vacuum":    has_vacuum = true
 	make_shops()
 
 
@@ -1078,7 +1099,7 @@ func dtext(f: Font, pos: Vector2, text: String, align: int, width: float, size: 
 func _draw_hud(font: Font, spd_col: Color) -> void:
 	var vp := get_viewport_rect().size
 	dtext(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
-	dtext(font, Vector2(22, 120), "CREDITS %d      MAT %d      SQUARES %d/%d" % [square_credits, asteroid_mats, inventory, max_inventory],
+	dtext(font, Vector2(22, 120), "SQUARES %d/%d      MAT %d" % [inventory, max_inventory, asteroid_mats],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.82, 0.82, 0.88))
 	# Seal hint: how close the tail is to wrapping the current ring.
 	if phase == "play" and current_ring < unlocked and not sealed[current_ring] and not moving:
@@ -1159,7 +1180,7 @@ func draw_shop_modal(font: Font) -> void:
 	draw_rect(Rect2(px - 3, py - 3, pw + 6, ph + 6), Color(0.45, 0.55, 0.75))   # border
 	draw_rect(Rect2(px, py, pw, ph), Color(0.09, 0.10, 0.14, 0.99))
 	draw_string(font, Vector2(px, py + 48), "UPGRADES", HORIZONTAL_ALIGNMENT_CENTER, pw, 36, Color(1, 1, 0.8))
-	draw_string(font, Vector2(px, py + 88), "CREDITS %d        MAT %d        CORE %d/%d" % [square_credits, asteroid_mats, int(core), int(core_cap)],
+	draw_string(font, Vector2(px, py + 88), "SQUARES %d/%d        MAT %d        CORE %d/%d" % [inventory, max_inventory, asteroid_mats, int(core), int(core_cap)],
 		HORIZONTAL_ALIGNMENT_CENTER, pw, 22, Color(0.78, 0.85, 0.95))
 
 	var y := py + head_h
@@ -1183,12 +1204,16 @@ func _modal_section(font: Font, header: String, items: Array, cur: String, px: f
 	for i in items.size():
 		var item: Dictionary = items[i]
 		var rect := Rect2(px + 26, y + 4, pw - 52, rowh - 8)
-		var have: int = square_credits if cur == "sq" else asteroid_mats
-		var afford: bool = have >= int(item.cost)
+		var have: int = inventory if cur == "sq" else asteroid_mats
+		var mat_cost: int = int(item.get("mat", 0))
+		var afford: bool = have >= int(item.cost) and asteroid_mats >= mat_cost
 		draw_rect(rect, Color(0.15, 0.24, 0.18) if afford else Color(0.16, 0.18, 0.23))
 		var name_col := Color(0.96, 0.98, 0.96) if afford else Color(0.72, 0.72, 0.78)
 		draw_string(font, rect.position + Vector2(16, 30), "[%d]  %s" % [key_base + i, item.name], HORIZONTAL_ALIGNMENT_LEFT, -1, 23, name_col)
-		draw_string(font, rect.position + Vector2(0, 30), "%d %s" % [int(item.cost), "cr" if cur == "sq" else "mat"], HORIZONTAL_ALIGNMENT_RIGHT, rect.size.x - 18, 21, name_col)
+		var cost_label := "%d %s" % [int(item.cost), "sq" if cur == "sq" else "mat"]
+		if mat_cost > 0:
+			cost_label += " + %d mat" % mat_cost
+		draw_string(font, rect.position + Vector2(0, 30), cost_label, HORIZONTAL_ALIGNMENT_RIGHT, rect.size.x - 18, 21, name_col)
 		draw_string(font, rect.position + Vector2(18, 50), item.get("desc", ""), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.64, 0.66, 0.72))
 		shop_hit.append({ "rect": rect, "action": "buy", "list": cur, "idx": i })
 		y += rowh
