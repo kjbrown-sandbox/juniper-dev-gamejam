@@ -96,7 +96,10 @@ To play-test the web build locally instead, run it from the editor, or serve
 - ✅ butler installed (`~/bin/butler`) and logged in
 - ✅ itch target wired in `build.sh` → `itchy-dev-games/juniper-dev-gamejam:html5`
   (update `GAME_SLUG` if you rename the page: <https://itchy-dev-games.itch.io/juniper-dev-gamejam>)
-- ⬜ On the itch.io game page, **enable "SharedArrayBuffer support"** in embed settings.
+- ⬜ On the itch.io game page (Edit game → **Embed options**), set:
+  - **Viewport dimensions = 1280 × 720** (2× the default; 16:9 to match the 1920×1080 project, no letterbox).
+  - **"Fullscreen button"** ON — export has `canvas_resize_policy=2` + stretch `expand`, so the canvas rescales to fill the screen.
+  - **"SharedArrayBuffer support"** ON (still required for Godot 4 web).
 - ⬜ First `./build.sh` will create/confirm `export_presets.cfg` with a "Web" preset.
 
 ---

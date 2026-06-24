@@ -24,6 +24,7 @@ extends Node2D
 @export var comet_emit_step := 0.04     # rad spacing between emitted tail particles
 @export var comet_dot := 5.0            # tail particle radius (world px)
 @export var seal_near := 0.70           # tail fraction of full at which the seal cinematic engages
+@export var ui_text_scale := 2.0        # multiplier on all HUD / in-world text sizes (shop modal excluded)
 @export var seal_slowmo := 0.15         # steady time scale held through the seal (pleenko orange-unlock value)
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
@@ -379,12 +380,18 @@ func speed_t() -> float:
 
 
 func tail_span() -> float:
-	# Angular length of the live tail = rotation accumulated while the oldest particle is
-	# still alive. The moon "catches its tail" (span >= TAU) by lapping within tail_life.
-	if comet.is_empty():
-		return 0.0
-	var oldest: Dictionary = comet[0]
-	return cum_angle - oldest.cum
+	# Angular length of the live tail = rotation since the oldest STILL-VISIBLE particle was
+	# dropped. The moon "catches its tail" (span >= TAU) by lapping within tail_life. A
+	# particle faded below 15% opacity is too ghostly to "collide" with, so it doesn't count
+	# — we measure to the oldest particle that's still at least 15% opaque.
+	for cp in comet:   # comet is ordered oldest-first
+		var lf: float = cp.life
+		var f := clampf(lf / tail_life, 0.0, 1.0)
+		var op := 1.0 - (1.0 - f) * (1.0 - f)   # same ease-out as the draw
+		if op >= 0.15:
+			var cm: float = cp.cum
+			return cum_angle - cm
+	return 0.0
 
 
 func seal_speed() -> float:
@@ -548,6 +555,7 @@ func _tick_play(sim: float) -> void:
 			move_t = 1.0
 			moving = false
 			current_ring = move_to
+			comet.clear()   # drop the spiral tail from the glide — a seal needs a full lap made ON the ring
 			if current_ring == 0:
 				arrive_at_hub()   # bank squares + open the upgrade screen
 		display_radius = lerpf(ring_r(move_from), ring_r(move_to), move_t)
@@ -601,7 +609,7 @@ func _tick_play(sim: float) -> void:
 			for n in light_count:
 				if unlocked < 2:
 					lights.append(rand_ahead())           # free before the core exists (ring 1)
-				elif core >= light_cost:
+				elif core > light_cost:                   # strict: never spend the last point
 					core -= light_cost
 					lights.append(rand_ahead())
 
@@ -662,7 +670,7 @@ func do_beam() -> void:
 
 
 func enemy_interval(i: int) -> float:
-	return [45.0, 40.0, 35.0, 30.0][i % 4]
+	return [40.0, 35.0, 30.0, 25.0][i % 4]
 
 
 func enemy_count(i: int) -> int:
@@ -968,12 +976,12 @@ func _draw() -> void:
 		draw_rect(Rect2(cbx - 2, cby - 2, cbw + 4, 16.0), Color(0.05, 0.05, 0.07))
 		draw_rect(Rect2(cbx, cby, cbw, 12.0), Color(0.14, 0.14, 0.18))
 		draw_rect(Rect2(cbx, cby, cbw * cfrac, 12.0), Color(0.85, 0.3, 0.3).lerp(Color(0.3, 0.85, 0.45), cfrac))
-		draw_string(font, Vector2(cbx, cby + 27.0), "CORE %d/%d" % [int(core), int(core_cap)], HORIZONTAL_ALIGNMENT_CENTER, cbw, 13, Color(0.92, 0.92, 0.96))
+		dtext(font,Vector2(cbx, cby + 27.0), "CORE %d/%d" % [int(core), int(core_cap)], HORIZONTAL_ALIGNMENT_CENTER, cbw, 13, Color(0.92, 0.92, 0.96))
 
 	# Shop is blocked by living enemies: prompt above the planet while waiting at the hub.
 	if hub_pending and not shop_open and current_ring == 0 and not threats.is_empty():
-		draw_string(font, c + Vector2(-230, -planet_draw_radius() * z - 34.0), "KILL ENEMIES TO OPEN THE SHOP",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(1, 0.3, 0.3))
+		dtext(font, c + Vector2(-450, -planet_draw_radius() * z - 40.0), "KILL ENEMIES TO OPEN THE SHOP",
+			HORIZONTAL_ALIGNMENT_CENTER, 900, 26, Color(1, 0.3, 0.3))
 
 	# Blaster beam.
 	if beam_on:
@@ -1002,7 +1010,7 @@ func _draw() -> void:
 		var hl: int = ast.hits_left
 		var ap := c + ring_point(ring_r(2), aa) * z
 		draw_circle(ap, asteroid_radius * z, Color(0.6, 0.55, 0.5))
-		draw_string(font, ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
+		dtext(font,ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
 
 	# Threats (siphoners).
 	for tr in threats:
@@ -1012,6 +1020,8 @@ func _draw() -> void:
 		var tcol := Color(1.0, 0.3, 0.85) if not latched else Color(1.0, 0.25, 0.25)
 		var rad := threat_radius * z
 		draw_colored_polygon([tp + Vector2(0, -rad), tp + Vector2(rad, 0), tp + Vector2(0, rad), tp + Vector2(-rad, 0)], tcol)
+		var thp: int = tr.hp
+		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
 
 	# Lights.
 	for i in lights.size():
@@ -1054,26 +1064,36 @@ func _draw() -> void:
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
-		draw_string(font, c + pu.pos * z + Vector2(-40, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 80, pu.size, Color(1, 1, 1, qa))
+		dtext(font, c + pu.pos * z + Vector2(-110, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 220, pu.size, Color(1, 1, 1, qa))
 
 	_draw_hud(font, spd_col)
 
 
+# Scaled text helper — same arg order as draw_string, but the font size is multiplied by
+# ui_text_scale. Used everywhere except the shop modal (its layout is sized to fixed fonts).
+func dtext(f: Font, pos: Vector2, text: String, align: int, width: float, size: int, color: Color) -> void:
+	draw_string(f, pos, text, align, width, int(round(float(size) * ui_text_scale)), color)
+
+
 func _draw_hud(font: Font, spd_col: Color) -> void:
 	var vp := get_viewport_rect().size
-	draw_string(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
-	draw_string(font, Vector2(22, 84), "CREDITS %d      MAT %d      SQUARES %d/%d" % [square_credits, asteroid_mats, inventory, max_inventory],
+	dtext(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
+	dtext(font, Vector2(22, 120), "CREDITS %d      MAT %d      SQUARES %d/%d" % [square_credits, asteroid_mats, inventory, max_inventory],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.82, 0.82, 0.88))
 	# Seal hint: how close the tail is to wrapping the current ring.
 	if phase == "play" and current_ring < unlocked and not sealed[current_ring] and not moving:
 		var pct := int(clampf(tail_span() / TAU, 0.0, 1.0) * 100.0)
-		draw_string(font, Vector2(22, 108), "SEAL RING %d: tail %d%%" % [current_ring + 1, pct],
+		dtext(font, Vector2(22, 168), "SEAL RING %d: tail %d%%" % [current_ring + 1, pct],
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.6, 0.9, 1.0))
+	# Core too low to make lights: head home to refill (it won't kill you, just dries up).
+	if phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
+		dtext(font, Vector2(22, 212), "CORE LOW — RETURN HOME TO REFILL",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 17, Color(1.0, 0.55, 0.2))
 
 	# Enemy spawn clock (Pleenko-style pie slice that depletes clockwise), on the left.
 	if enemy_active:
-		var ck := Vector2(74, 220)
-		var cr := 42.0
+		var ck := Vector2(90, 320)
+		var cr := 48.0
 		var secs := maxi(0, ceili(threat_timer))
 		var total := enemy_interval(threat_spawn_count)
 		var frac := clampf(float(secs) / maxf(1.0, total), 0.0, 1.0)
@@ -1085,34 +1105,35 @@ func _draw_hud(font: Font, spd_col: Color) -> void:
 				var a := -PI / 2.0 + sweep * (float(i) / 32.0)
 				pts.append(ck + Vector2(cos(a), sin(a)) * cr)
 			draw_colored_polygon(pts, Color(0.92, 0.92, 1.0))
-		draw_string(font, ck + Vector2(-cr, 9), str(secs), HORIZONTAL_ALIGNMENT_CENTER, cr * 2.0, 26, Color(0.1, 0.1, 0.15))
+		dtext(font, ck + Vector2(-cr, 14), str(secs), HORIZONTAL_ALIGNMENT_CENTER, cr * 2.0, 26, Color(0.1, 0.1, 0.15))
 		var cnt := enemy_count(threat_spawn_count)
 		var etext := ("%d enemy will spawn" if cnt == 1 else "%d enemies will spawn") % cnt
-		draw_string(font, Vector2(ck.x - 110, ck.y + cr + 28.0), etext, HORIZONTAL_ALIGNMENT_CENTER, 220, 17, Color(1, 0.58, 0.5))
+		dtext(font, Vector2(ck.x - 200, ck.y + cr + 34.0), etext, HORIZONTAL_ALIGNMENT_CENTER, 400, 17, Color(1, 0.58, 0.5))
 
 	# Game timer (top-right corner).
 	var mins := int(game_time) / 60
 	var secs := int(game_time) % 60
-	draw_string(font, Vector2(vp.x - 110, 34), "%d:%02d" % [mins, secs], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(0.85, 0.85, 0.9))
+	dtext(font, Vector2(vp.x - 170, 44), "%d:%02d" % [mins, secs], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(0.85, 0.85, 0.9))
 
 	# Controls hint (top-right, under the timer).
 	var hint := "SPACE boost/grab   UP/DOWN rings   1-8 buy (hub)   P pause"
 	if has_blasters:
 		hint += "   hold F: blaster"
 	hint += "   R restart"
-	draw_string(font, Vector2(vp.x - 760, 58), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.55, 0.55, 0.6))
+	dtext(font, Vector2(vp.x - 1320, 104), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.55, 0.55, 0.6))
 
 	var sc := screen_center()
+	# Centered banners — CENTER alignment in a wide box so they stay centered at any text scale.
 	if paused:
-		draw_string(font, sc + Vector2(-70, -170), "PAUSED  (P)", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color(0.9, 0.9, 1.0))
+		dtext(font, sc + Vector2(-500, -180), "PAUSED  (P)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, Color(0.9, 0.9, 1.0))
 	elif not started and phase == "play":
-		draw_string(font, sc + Vector2(-150, -170), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(0.9, 0.95, 0.6))
+		dtext(font, sc + Vector2(-500, -180), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_CENTER, 1000, 26, Color(0.9, 0.95, 0.6))
 	elif phase == "won":
-		draw_string(font, sc + Vector2(-160, -170), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color(0.5, 1, 0.6))
+		dtext(font, sc + Vector2(-500, -180), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, Color(0.5, 1, 0.6))
 	elif phase == "dead":
-		draw_string(font, sc + Vector2(-200, -170), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(1, 0.4, 0.4))
+		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, Color(1, 0.4, 0.4))
 	elif banner_timer > 0.0:
-		draw_string(font, sc + Vector2(-170, -170), banner_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(1, 1, 0.6))
+		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, Color(1, 1, 0.6))
 
 	if shop_open:
 		draw_shop_modal(font)
