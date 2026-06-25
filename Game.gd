@@ -6,6 +6,11 @@ extends Node2D
 # upgrades. Asteroids (ring 3) = mat for BATTLE upgrades; siphoners attack the core.
 # Target: a complete, beautiful 5-10 min arc. One file. Disposable.
 
+# ── Reskin palette ─────────────────────────────────────────
+# Every drawable color reads from this resource. Swap the assigned .tres (or tweak its
+# swatches live in the inspector) to reskin the whole game without touching gameplay.
+@export var style: VisualStyle
+
 # ── Rings ──────────────────────────────────────────────────
 @export var base_radius := 180.0
 @export var ring_gap := 300.0
@@ -20,7 +25,7 @@ extends Node2D
 # ── Tail / speed ───────────────────────────────────────────
 @export var tail_life := 1.8            # seconds a tail particle lingers; sealing = lap within this time
 @export var feed_up := 5.0              # +50% of base feed per Bigger-squares level (10->15->20->25)
-@export var tail_color := Color(1.0, 0.85, 0.2)   # yellow comet tail
+# (comet tail color now lives in the reskin palette: style.tail)
 @export var comet_emit_step := 0.04     # rad spacing between emitted tail particles
 @export var comet_dot := 5.0            # tail particle radius (world px)
 @export var seal_near := 0.70           # tail fraction of full at which the seal cinematic engages
@@ -171,6 +176,8 @@ var _base := {}   # snapshot of upgrade-modified export bases (so reset honors t
 
 
 func _ready() -> void:
+	if style == null:
+		style = VisualStyle.new()   # defaults reproduce the original look
 	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
 	# (reset() restores from here instead of hardcoded duplicates).
 	_base = {
@@ -994,21 +1001,25 @@ func buy(node: Dictionary) -> void:
 
 # ── Rendering ──────────────────────────────────────────────
 func _draw() -> void:
+	_draw_background()   # full-viewport sky/stars/silhouette (no-op when style bg is transparent)
 	var font := ThemeDB.fallback_font
 	var t := speed_t()
 	# Camera: view_scale frames the ring; cam_zoom/cam_focus add the near-seal punch-in.
 	var z := view_scale * cam_zoom
 	var c := screen_center() + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * shake * 9.0 - cam_focus * z
-	var spd_col := Color(0.40, 0.70, 1.0).lerp(Color(1.0, 0.55, 0.15), t)
+	var spd_col := style.spd_slow.lerp(style.spd_fast, t)
 
 	# Rings (sealed = bright ring, unsealed-unlocked = dim, locked = very dim).
 	for i in 3:
 		if i >= unlocked and not sealed[i]:
 			continue
-		var col := Color(0.22, 0.22, 0.30)
+		var col := style.ring_locked
 		if sealed[i]:
-			col = Color(0.5, 0.85, 1.0)
-		draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, 3.0 if sealed[i] else 2.0)
+			col = style.ring_sealed
+		if sealed[i]:
+			draw_glow_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_sealed)
+		else:
+			draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_locked)
 
 	# The comet tail: yellow particles the moon drops as it flies; they linger and fade.
 	for cp in comet:
@@ -1017,12 +1028,12 @@ func _draw() -> void:
 		var f := clampf(clf / tail_life, 0.0, 1.0)
 		# Ease-out (quadratic): bright for most of the life, then a quick fade at the tail end.
 		var fa := 1.0 - (1.0 - f) * (1.0 - f)
-		var col := tail_color
-		col.a = fa
+		var col := style.tail
+		col.a = style.tail.a * fa
 		draw_circle(c + cpos * z, comet_dot * z * (0.4 + 0.6 * fa), col)
 
 	# Planet — heals (grows + brightens) with rings sealed.
-	var pcol := Color(0.30, 0.22, 0.20).lerp(Color(0.55, 0.9, 0.75), float(sealed_count()) / 3.0)
+	var pcol := style.planet_sick.lerp(style.planet_healed, float(sealed_count()) / 3.0)
 	draw_circle(c, planet_draw_radius() * z, pcol)
 
 	# Core health bar beneath the planet — only once the core exists (ring 2+).
@@ -1031,23 +1042,23 @@ func _draw() -> void:
 		var cby := c.y + planet_draw_radius() * z + 16.0
 		var cbx := c.x - cbw * 0.5
 		var cfrac := clampf(core / core_cap, 0.0, 1.0)
-		draw_rect(Rect2(cbx - 2, cby - 2, cbw + 4, 16.0), Color(0.05, 0.05, 0.07))
-		draw_rect(Rect2(cbx, cby, cbw, 12.0), Color(0.14, 0.14, 0.18))
-		draw_rect(Rect2(cbx, cby, cbw * cfrac, 12.0), Color(0.85, 0.3, 0.3).lerp(Color(0.3, 0.85, 0.45), cfrac))
-		dtext(font,Vector2(cbx, cby + 27.0), "CORE %d/%d" % [int(core), int(core_cap)], HORIZONTAL_ALIGNMENT_CENTER, cbw, 13, Color(0.92, 0.92, 0.96))
+		draw_rect(Rect2(cbx - 2, cby - 2, cbw + 4, 16.0), style.core_bar_border)
+		draw_rect(Rect2(cbx, cby, cbw, 12.0), style.core_bar_bg)
+		draw_rect(Rect2(cbx, cby, cbw * cfrac, 12.0), style.core_bar_low.lerp(style.core_bar_full, cfrac))
+		dtext(font,Vector2(cbx, cby + 27.0), "CORE %d/%d" % [int(core), int(core_cap)], HORIZONTAL_ALIGNMENT_CENTER, cbw, 13, style.core_text)
 
 	# Shop is blocked by living enemies: prompt above the planet while waiting at the hub.
 	if hub_pending and not shop_open and current_ring == 0 and not threats.is_empty():
 		dtext(font, c + Vector2(-450, -planet_draw_radius() * z - 40.0), "KILL ENEMIES TO OPEN THE SHOP",
-			HORIZONTAL_ALIGNMENT_CENTER, 900, 26, Color(1, 0.3, 0.3))
+			HORIZONTAL_ALIGNMENT_CENTER, 900, 26, style.shop_blocked)
 
 	# Blaster beam.
 	if beam_on:
 		var bd := Vector2(cos(angle), sin(angle))
 		var p_in := c + bd * planet_draw_radius() * z
 		var p_out := c + bd * ring_r(2) * 1.3 * z
-		draw_line(p_in, p_out, Color(1.0, 0.4, 0.9, 0.9), (beam_width * 2.0) * 80.0 * z)
-		draw_line(p_in, p_out, Color(1, 1, 1, 0.9), 3.0)
+		draw_glow_line(p_in, p_out, style.beam_outer, (beam_width * 2.0) * 80.0 * z)
+		draw_line(p_in, p_out, style.beam_core, 3.0)
 
 	# Squares (middle ring) — gray while not yet grabbable, cyan once ready.
 	for i in materials.size():
@@ -1056,10 +1067,10 @@ func _draw() -> void:
 		var msz := 11.0 * z
 		var scol: Color
 		if m.ready > 0.0:
-			scol = Color(0.5, 0.5, 0.55)   # gray, fading in, until ready
-			scol.a = clampf(1.0 - m.ready / maxf(0.01, square_ready_time), 0.25, 1.0)
+			scol = style.square_pending   # fading in until ready
+			scol.a = style.square_pending.a * clampf(1.0 - m.ready / maxf(0.01, square_ready_time), 0.25, 1.0)
 		else:
-			scol = Color(0.4, 0.85, 0.95)  # cyan = grabbable
+			scol = style.square_ready     # grabbable
 		draw_rect(Rect2(mp - Vector2(msz, msz) * 0.5, Vector2(msz, msz)), scol)
 
 	# Asteroids.
@@ -1067,19 +1078,19 @@ func _draw() -> void:
 		var aa: float = ast.angle
 		var hl: int = ast.hits_left
 		var ap := c + ring_point(ring_r(2), aa) * z
-		draw_circle(ap, asteroid_radius * z, Color(0.6, 0.55, 0.5))
-		dtext(font,ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
+		draw_circle(ap, asteroid_radius * z, style.asteroid)
+		dtext(font,ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.asteroid_text)
 
 	# Threats (siphoners).
 	for tr in threats:
 		var trad: float = tr.radius
 		var latched: bool = tr.latched
 		var tp := c + ring_point(trad, tr.angle) * z
-		var tcol := Color(1.0, 0.3, 0.85) if not latched else Color(1.0, 0.25, 0.25)
+		var tcol := style.threat_flying if not latched else style.threat_latched
 		var rad := threat_radius * z
 		draw_colored_polygon([tp + Vector2(0, -rad), tp + Vector2(rad, 0), tp + Vector2(0, rad), tp + Vector2(-rad, 0)], tcol)
 		var thp: int = tr.hp
-		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, Color(1, 1, 1))
+		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.threat_text)
 
 	# Lights.
 	for i in lights.size():
@@ -1087,18 +1098,20 @@ func _draw() -> void:
 		var lr := display_radius * z
 		var half_ang := gate_dist / maxf(1.0, display_radius)   # constant-distance window
 		var on: bool = display_radius * absf(wrapf(angle - ang, -PI, PI)) <= gate_dist
-		var idle_col := Color(1.0, 0.5, 0.1) if light_dying() else Color(0.95, 0.85, 0.2)   # orange as the core dies
-		var col := Color(0.3, 1.0, 0.45) if on else idle_col
+		var idle_col := style.light_dying if light_dying() else style.light_idle   # orange as the core dies
+		var col := style.light_on if on else idle_col
 		var zone := col
-		zone.a = 0.22
+		zone.a = style.light_zone_alpha
 		draw_arc(c, lr, ang - half_ang, ang + half_ang, 14, zone, 8.0)
 		var dir := Vector2(cos(ang), sin(ang))
-		draw_line(c + dir * (lr - 14.0), c + dir * (lr + 14.0), col, 4.0)
+		draw_glow_line(c + dir * (lr - 14.0), c + dir * (lr + 14.0), col, 4.0)
 
 	for fl in flashes:
 		var fa := clampf(fl.life / 0.6, 0.0, 1.0)
 		var maxr: float = fl.get("r", 120.0)   # shockwaves pass a larger radius
-		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, Color(1, 1, 1, fa), 3.0)
+		var flcol := style.flash
+		flcol.a = style.flash.a * fa
+		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, flcol, 3.0)
 
 	# Flying squares (feed animation).
 	for f in flying:
@@ -1106,7 +1119,7 @@ func _draw() -> void:
 		var fft: float = f.t
 		var wpos := fst.lerp(Vector2.ZERO, fft)
 		var fsz := 9.0 * z * (1.0 - 0.4 * fft)
-		draw_rect(Rect2(c + wpos * z - Vector2(fsz, fsz) * 0.5, Vector2(fsz, fsz)), Color(0.4, 0.85, 0.95))
+		draw_rect(Rect2(c + wpos * z - Vector2(fsz, fsz) * 0.5, Vector2(fsz, fsz)), style.square_ready)
 
 	# Carried squares trailing the moon.
 	var carried := mini(inventory, 8)
@@ -1116,16 +1129,95 @@ func _draw() -> void:
 			var tpos: Vector2 = trail[idx]
 			var sp := c + tpos * z
 			var ssz := 8.0 * z
-			draw_rect(Rect2(sp - Vector2(ssz, ssz) * 0.5, Vector2(ssz, ssz)), Color(0.4, 0.85, 0.95))
+			draw_rect(Rect2(sp - Vector2(ssz, ssz) * 0.5, Vector2(ssz, ssz)), style.square_ready)
 
 	# Moon (the comet head).
-	draw_circle(c + moon_world() * z, moon_radius * z, Color(0.7, 0.85, 1.0).lerp(Color(1, 1, 1), t))
+	draw_glow_circle(c + moon_world() * z, moon_radius * z, style.moon_slow.lerp(style.moon_fast, t))
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
 		dtext(font, c + pu.pos * z + Vector2(-110, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 220, pu.size, Color(1, 1, 1, qa))
 
 	_draw_hud(font, spd_col)
+
+
+# ── Reskin render helpers ──────────────────────────────────
+# Full-viewport background painted before the world. No-op for the base look (bg colors
+# are transparent). Reskins set bg_top/bg_bottom for a sky gradient, and optionally a
+# starfield or a silhouette treeline.
+func _draw_background() -> void:
+	var vp := get_viewport_rect().size
+	if style.bg_top.a > 0.0 or style.bg_bottom.a > 0.0:
+		var n := maxi(1, style.bg_bands)
+		for i in n:
+			var f := float(i) / float(n)
+			draw_rect(Rect2(0.0, vp.y * float(i) / float(n), vp.x, vp.y / float(n) + 1.0),
+				style.bg_top.lerp(style.bg_bottom, f))
+	if style.enable_starfield:
+		_draw_starfield(vp)
+	if style.enable_treeline:
+		_draw_treeline(vp)
+
+
+func _draw_starfield(vp: Vector2) -> void:
+	# Deterministic (seeded) so stars stay put; only twinkle animates.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 1337
+	for i in style.star_count:
+		var p := Vector2(rng.randf() * vp.x, rng.randf() * vp.y)
+		var rr := rng.randf_range(0.6, 1.9)
+		var a := style.star_color.a
+		if style.star_twinkle > 0.0:
+			a *= 1.0 - style.star_twinkle * (0.5 + 0.5 * sin(game_time * 2.2 + float(i) * 1.7))
+		var col := style.star_color
+		col.a = clampf(a, 0.0, 1.0)
+		draw_circle(p, rr, col)
+
+
+func _draw_treeline(vp: Vector2) -> void:
+	# Simple triangle silhouette band along the bottom — a cheap storybook horizon.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 909
+	var n := 26
+	for i in n:
+		var x := vp.x * float(i) / float(n - 1)
+		var w := vp.x / float(n) * rng.randf_range(0.7, 1.4)
+		var h := style.treeline_height * rng.randf_range(0.45, 1.2)
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(x - w * 0.5, vp.y), Vector2(x, vp.y - h), Vector2(x + w * 0.5, vp.y)
+		]), style.treeline_color)
+
+
+# Fake bloom: stack N concentric draws with growing size + decaying alpha, then the crisp
+# core on top. Gated by style.glow_enable so the base look pays nothing. Respects col.a.
+func draw_glow_circle(pos: Vector2, r: float, col: Color) -> void:
+	if style.glow_enable:
+		for i in range(style.glow_layers, 0, -1):
+			var lt := float(i) / float(style.glow_layers)
+			var gc := col
+			gc.a = col.a * style.glow_alpha * (1.0 - lt) * (1.0 - lt)
+			draw_circle(pos, r * (1.0 + (style.glow_spread - 1.0) * lt), gc)
+	draw_circle(pos, r, col)
+
+
+func draw_glow_arc(center: Vector2, radius: float, a0: float, a1: float, points: int, col: Color, base_w: float) -> void:
+	if style.glow_enable:
+		for i in range(style.glow_layers, 0, -1):
+			var lt := float(i) / float(style.glow_layers)
+			var gc := col
+			gc.a = col.a * style.glow_alpha * (1.0 - lt) * (1.0 - lt)
+			draw_arc(center, radius, a0, a1, points, gc, base_w * (1.0 + (style.glow_spread - 1.0) * lt * 2.0))
+	draw_arc(center, radius, a0, a1, points, col, base_w)
+
+
+func draw_glow_line(a: Vector2, b: Vector2, col: Color, base_w: float) -> void:
+	if style.glow_enable:
+		for i in range(style.glow_layers, 0, -1):
+			var lt := float(i) / float(style.glow_layers)
+			var gc := col
+			gc.a = col.a * style.glow_alpha * (1.0 - lt) * (1.0 - lt)
+			draw_line(a, b, gc, base_w * (1.0 + (style.glow_spread - 1.0) * lt * 2.0))
+	draw_line(a, b, col, base_w)
 
 
 # Scaled text helper — same arg order as draw_string, but the font size is multiplied by
@@ -1138,16 +1230,16 @@ func _draw_hud(font: Font, spd_col: Color) -> void:
 	var vp := get_viewport_rect().size
 	dtext(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
 	dtext(font, Vector2(22, 120), "SQUARES %d/%d      MAT %d" % [inventory, max_inventory, asteroid_mats],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.82, 0.82, 0.88))
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, style.hud_text)
 	# Seal hint: how close the tail is to wrapping the current ring.
 	if phase == "play" and current_ring < unlocked and not sealed[current_ring] and not moving:
 		var pct := int(clampf(tail_span() / TAU, 0.0, 1.0) * 100.0)
 		dtext(font, Vector2(22, 168), "SEAL RING %d: tail %d%%" % [current_ring + 1, pct],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.6, 0.9, 1.0))
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, style.hud_seal_hint)
 	# Core too low to make lights: head home to refill (it won't kill you, just dries up).
 	if phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
 		dtext(font, Vector2(22, 212), "CORE LOW — RETURN HOME TO REFILL",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 17, Color(1.0, 0.55, 0.2))
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 17, style.hud_warn)
 
 	# Enemy spawn clock (Pleenko-style pie slice that depletes clockwise), on the left.
 	if enemy_active:
@@ -1156,43 +1248,43 @@ func _draw_hud(font: Font, spd_col: Color) -> void:
 		var secs := maxi(0, ceili(threat_timer))
 		var total := enemy_interval(threat_spawn_count)
 		var frac := clampf(float(secs) / maxf(1.0, total), 0.0, 1.0)
-		draw_arc(ck, cr, 0.0, TAU, 48, Color(0.22, 0.22, 0.28), 3.0)
+		draw_arc(ck, cr, 0.0, TAU, 48, style.clock_ring, 3.0)
 		if frac > 0.0:
 			var pts := PackedVector2Array([ck])
 			var sweep := TAU * frac
 			for i in 33:
 				var a := -PI / 2.0 + sweep * (float(i) / 32.0)
 				pts.append(ck + Vector2(cos(a), sin(a)) * cr)
-			draw_colored_polygon(pts, Color(0.92, 0.92, 1.0))
-		dtext(font, ck + Vector2(-cr, 14), str(secs), HORIZONTAL_ALIGNMENT_CENTER, cr * 2.0, 26, Color(0.1, 0.1, 0.15))
+			draw_colored_polygon(pts, style.clock_fill)
+		dtext(font, ck + Vector2(-cr, 14), str(secs), HORIZONTAL_ALIGNMENT_CENTER, cr * 2.0, 26, style.clock_text)
 		var cnt := enemy_count(threat_spawn_count)
 		var etext := ("%d enemy will spawn" if cnt == 1 else "%d enemies will spawn") % cnt
-		dtext(font, Vector2(ck.x - 200, ck.y + cr + 34.0), etext, HORIZONTAL_ALIGNMENT_CENTER, 400, 17, Color(1, 0.58, 0.5))
+		dtext(font, Vector2(ck.x - 200, ck.y + cr + 34.0), etext, HORIZONTAL_ALIGNMENT_CENTER, 400, 17, style.enemy_warn)
 
 	# Game timer (top-right corner).
 	var mins := int(game_time) / 60
 	var secs := int(game_time) % 60
-	dtext(font, Vector2(vp.x - 170, 44), "%d:%02d" % [mins, secs], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color(0.85, 0.85, 0.9))
+	dtext(font, Vector2(vp.x - 170, 44), "%d:%02d" % [mins, secs], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, style.hud_timer)
 
 	# Controls hint (top-right, under the timer).
 	var hint := "SPACE boost/grab   UP/DOWN rings   1-8 buy (hub)   P pause"
 	if has_blasters:
 		hint += "   hold F: blaster"
 	hint += "   R restart"
-	dtext(font, Vector2(vp.x - 1320, 104), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.55, 0.55, 0.6))
+	dtext(font, Vector2(vp.x - 1320, 104), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, style.hud_dim)
 
 	var sc := screen_center()
 	# Centered banners — CENTER alignment in a wide box so they stay centered at any text scale.
 	if paused:
-		dtext(font, sc + Vector2(-500, -180), "PAUSED  (P)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, Color(0.9, 0.9, 1.0))
+		dtext(font, sc + Vector2(-500, -180), "PAUSED  (P)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_pause)
 	elif not started and phase == "play":
-		dtext(font, sc + Vector2(-500, -180), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_CENTER, 1000, 26, Color(0.9, 0.95, 0.6))
+		dtext(font, sc + Vector2(-500, -180), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_CENTER, 1000, 26, style.banner_launch)
 	elif phase == "won":
-		dtext(font, sc + Vector2(-500, -180), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, Color(0.5, 1, 0.6))
+		dtext(font, sc + Vector2(-500, -180), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_win)
 	elif phase == "dead":
-		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, Color(1, 0.4, 0.4))
+		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_lose)
 	elif banner_timer > 0.0:
-		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, Color(1, 1, 0.6))
+		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_info)
 
 	if shop_open:
 		draw_shop_modal(font)

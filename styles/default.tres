@@ -1,0 +1,6 @@
+[gd_resource type="Resource" script_class="VisualStyle" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://visual_style.gd" id="1_vs"]
+
+[resource]
+script = ExtResource("1_vs")
