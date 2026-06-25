@@ -1,0 +1,36 @@
+[gd_resource type="Resource" script_class="VisualStyle" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://visual_style.gd" id="1_vs"]
+
+[resource]
+script = ExtResource("1_vs")
+bg_top = Color(0.04, 0.015, 0.11, 1)
+bg_bottom = Color(0.16, 0.03, 0.22, 1)
+enable_grid = true
+grid_color = Color(0.95, 0.2, 0.85, 0.13)
+grid_spacing = 72.0
+glow_enable = true
+glow_layers = 5
+glow_spread = 2.7
+glow_alpha = 0.55
+ring_locked = Color(0.34, 0.12, 0.46, 1)
+ring_sealed = Color(0.2, 1.0, 1.0, 1)
+ring_w_sealed = 3.5
+tail = Color(1.0, 0.9, 0.25, 1)
+moon_slow = Color(0.4, 0.95, 1.0, 1)
+moon_fast = Color(1, 1, 1, 1)
+planet_sick = Color(0.16, 0.05, 0.26, 1)
+planet_healed = Color(0.2, 1.0, 0.85, 1)
+square_pending = Color(0.42, 0.3, 0.55, 1)
+square_ready = Color(0.3, 1.0, 1.0, 1)
+asteroid = Color(0.62, 0.4, 0.72, 1)
+threat_flying = Color(1.0, 0.2, 0.72, 1)
+threat_latched = Color(1.0, 0.25, 0.35, 1)
+light_idle = Color(1.0, 0.85, 0.25, 1)
+light_on = Color(0.35, 1.0, 0.55, 1)
+beam_outer = Color(1.0, 0.3, 0.95, 0.9)
+spd_slow = Color(0.4, 0.95, 1.0, 1)
+spd_fast = Color(1.0, 0.3, 0.85, 1)
+hud_text = Color(0.82, 0.72, 1.0, 1)
+hud_seal_hint = Color(0.4, 1.0, 1.0, 1)
+banner_info = Color(1.0, 0.85, 0.4, 1)

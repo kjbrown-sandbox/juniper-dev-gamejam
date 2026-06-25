@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3 uid="uid://dfua4sv1eskq1"]
 
 [ext_resource type="Script" path="res://Game.gd" id="1_g"]
-[ext_resource type="Resource" path="res://styles/default.tres" id="2_style"]
+[ext_resource type="Resource" path="res://styles/synthwave.tres" id="2_style"]
 
 [node name="Game" type="Node2D"]
 script = ExtResource("1_g")
