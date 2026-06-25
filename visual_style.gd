@@ -18,6 +18,12 @@ class_name VisualStyle extends Resource
 @export var enable_treeline := false                 # forest-dusk silhouette along the bottom
 @export var treeline_color: Color = Color(0.04, 0.05, 0.09)
 @export var treeline_height := 220.0
+@export var enable_grid := false                     # synthwave flat neon grid
+@export var grid_color: Color = Color(0.6, 0.2, 0.8, 0.18)
+@export var grid_spacing := 64.0
+@export var enable_shooting_stars := false           # occasional streaks across the sky
+@export var shoot_color: Color = Color(1, 1, 1, 0.9)
+@export var shoot_count := 3
 
 # ── Fake bloom (stacked alpha draws; renderer-agnostic, safe for web) ──
 @export_group("Glow")

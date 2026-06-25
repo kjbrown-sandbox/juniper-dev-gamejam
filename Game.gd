@@ -1153,10 +1153,48 @@ func _draw_background() -> void:
 			var f := float(i) / float(n)
 			draw_rect(Rect2(0.0, vp.y * float(i) / float(n), vp.x, vp.y / float(n) + 1.0),
 				style.bg_top.lerp(style.bg_bottom, f))
+	if style.enable_grid:
+		_draw_grid(vp)
 	if style.enable_starfield:
 		_draw_starfield(vp)
+	if style.enable_shooting_stars:
+		_draw_shooting_stars(vp)
 	if style.enable_treeline:
 		_draw_treeline(vp)
+
+
+func _draw_grid(vp: Vector2) -> void:
+	var sp := maxf(8.0, style.grid_spacing)
+	var x := 0.0
+	while x <= vp.x:
+		draw_line(Vector2(x, 0), Vector2(x, vp.y), style.grid_color, 1.0)
+		x += sp
+	var y := 0.0
+	while y <= vp.y:
+		draw_line(Vector2(0, y), Vector2(vp.x, y), style.grid_color, 1.0)
+		y += sp
+
+
+func _draw_shooting_stars(vp: Vector2) -> void:
+	# Deterministic streaks: each star cycles on its own period from game_time, sweeping a
+	# diagonal line across the sky, visible only for a slice of its cycle.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	for i in style.shoot_count:
+		var period := rng.randf_range(6.0, 12.0)
+		var phase := fposmod(game_time + rng.randf() * period, period) / period
+		if phase > 0.18:
+			continue   # off-screen most of the cycle
+		var p := phase / 0.18
+		var y0 := rng.randf_range(0.0, vp.y * 0.55)
+		var dir := Vector2(1.0, 0.35).normalized()
+		var span := vp.x * 0.5
+		var head := Vector2(-100.0 + (vp.x + 200.0) * p, y0)
+		var tail := head - dir * span * 0.18
+		var col := style.shoot_color
+		col.a = style.shoot_color.a * sin(p * PI)   # fade in then out
+		draw_line(tail, head, col, 2.0)
+		draw_circle(head, 2.2, col)
 
 
 func _draw_starfield(vp: Vector2) -> void:
