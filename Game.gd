@@ -14,6 +14,11 @@ extends Node2D
 # All in-game text uses this font (Quantico). Swap the weight in the inspector if desired.
 @export var ui_font: Font
 
+# Runtime asset handles, built in _ready(): looping background-music player + the arrow icon
+# recolored (via Icon.recolored) from its source green to the hint text color.
+var music: AudioStreamPlayer
+var arrow_tex: Texture2D
+
 # ── Rings ──────────────────────────────────────────────────
 @export var base_radius := 180.0
 @export var ring_gap := 300.0
@@ -36,7 +41,6 @@ extends Node2D
 @export var seal_slowmo := 0.15         # steady time scale held through the seal (pleenko orange-unlock value)
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
-@export var reveal_dur := 1.8           # s the camera zooms out to show the newly opened ring
 @export var gate_dist := 70.0          # px along the ring to accept a light (same on every ring)
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
@@ -123,6 +127,9 @@ var moving := false
 var move_from := 0
 var move_to := 0
 var move_t := 0.0
+var nav_hint_wait := false   # armed at first auto-launch; waiting for the glide to land
+var nav_hint_show := false   # currently displaying the top-center ring-nav hint
+var nav_hint_seen := false   # once dismissed, never arm/show again
 var view_scale := 1.0
 var display_tail := 0.0   # eased tail angle (for subtle growth + the seal check)
 var sealing := false      # committed seal cinematic (latched until contact; failsafe-guaranteed)
@@ -130,7 +137,6 @@ var seal_anim := 0.0
 var time_scale := 1.0
 var cam_focus := Vector2.ZERO
 var cam_zoom := 1.0
-var reveal_timer := 0.0
 var game_time := 0.0
 var comet: Array = []     # tail particles: { pos:Vector2, life:float, cum:float }
 var cum_angle := 0.0      # unwrapped accumulated rotation (drives the seal span)
@@ -190,6 +196,16 @@ func _ready() -> void:
 		style = VisualStyle.new()   # defaults reproduce the original look
 	if ui_font == null:
 		ui_font = load("res://assets/fonts/Quantico/Quantico-Regular.ttf")
+	# Background music: a looping player, started on the first SPACE (a user gesture, which
+	# satisfies the browser autoplay policy in the web build).
+	music = AudioStreamPlayer.new()
+	var ms: AudioStream = load("res://assets/sound/magic space.mp3")
+	if ms is AudioStreamMP3:
+		(ms as AudioStreamMP3).loop = true
+	music.stream = ms
+	add_child(music)
+	# Recolor the green arrow art to the hint text color for the ring-nav prompt.
+	arrow_tex = Icon.recolored(load("res://assets/icons/arrows.png"), style.banner_info)
 	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
 	# (reset() restores from here instead of hardcoded duplicates).
 	_base = {
@@ -353,10 +369,12 @@ func reset() -> void:
 	cum_angle = 0.0
 	sealing = false
 	seal_anim = 0.0
+	nav_hint_wait = false
+	nav_hint_show = false
+	nav_hint_seen = false
 	time_scale = 1.0
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
-	reveal_timer = 0.0
 	game_time = 0.0
 	view_scale = desired_scale()
 	queue_redraw()
@@ -393,9 +411,7 @@ func frame_scale(r: float) -> float:
 
 
 func desired_scale() -> float:
-	if reveal_timer > 0.0:
-		return frame_scale(ring_r(unlocked - 1))   # zoom out to show the newly opened ring
-	return frame_scale(display_radius)
+	return frame_scale(display_radius)   # camera always frames the ring the moon is on (incl. the auto-launch glide)
 
 
 func moon_world() -> Vector2:
@@ -505,7 +521,17 @@ func try_seal() -> void:
 		phase = "won"
 		return
 	unlocked = sealed_count() + 1
-	reveal_timer = reveal_dur   # camera zooms out to reveal the new ring
+	# Extra burst of light: the moon broke free of this ring's orbit.
+	shake = minf(3.0, shake + 0.8)
+	flashes.append({ "pos": Vector2.ZERO, "life": 0.6, "r": ring_r(unlocked - 1) })   # light ring expanding out to the new ring
+	flashes.append({ "pos": mp, "life": 0.6, "r": 220.0 })                            # burst at the launch point
+	# Auto-launch onto the freshly opened ring, carrying momentum (no traverse_cost).
+	move_from = current_ring
+	move_to = unlocked - 1
+	move_t = 0.0
+	moving = true
+	if not nav_hint_seen:
+		nav_hint_wait = true   # show the ring-nav hint once we land
 	banner_text = "RING SEALED — RING %d OPEN" % unlocked
 	banner_timer = 2.5
 	if unlocked == 2:
@@ -544,7 +570,6 @@ func _process(delta: float) -> void:
 		_tick_play(sim)
 
 	space_cd = maxf(0.0, space_cd - delta)
-	reveal_timer = maxf(0.0, reveal_timer - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
 	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
@@ -586,6 +611,9 @@ func _tick_play(sim: float) -> void:
 			comet.clear()   # drop the spiral tail from the glide — a seal needs a full lap made ON the ring
 			if current_ring == 0:
 				arrive_at_hub()   # bank squares + open the upgrade screen
+			if nav_hint_wait:
+				nav_hint_wait = false
+				nav_hint_show = true   # landed on the new outer ring — teach UP/DOWN
 		display_radius = lerpf(ring_r(move_from), ring_r(move_to), move_t)
 	else:
 		display_radius = ring_r(current_ring)
@@ -699,6 +727,7 @@ func do_beam() -> void:
 			for i in 6:
 				particles.append({ "pos": tp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 260.0), "life": randf_range(0.2, 0.5) })
 	if killed:
+		shake = minf(2.0, shake + 0.5)   # punch the screen when the beam vaporizes an enemy
 		threats = threats.filter(func(t): return t.hp > 0)
 
 
@@ -798,6 +827,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					enemy_active = true             # and enemies start attacking immediately
 					threat_spawn_count = 0
 					threat_timer = enemy_interval(0)
+					if not music.playing:
+						music.play()    # background music starts on the very first launch, then loops
 				if not try_boost():
 					space_cd = space_cd_time   # only rate-limit a MISS; a hit lets you go again
 		KEY_B:
@@ -812,9 +843,15 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				popups.append({ "pos": bp, "text": "MATERIAL BOOST", "life": 0.8, "size": 18 })
 		KEY_UP:
 			if phase == "play":
+				if nav_hint_show:
+					nav_hint_show = false
+					nav_hint_seen = true
 				traverse(1)
 		KEY_DOWN:
 			if phase == "play":
+				if nav_hint_show:
+					nav_hint_show = false
+					nav_hint_seen = true
 				traverse(-1)
 		KEY_P:
 			if phase == "play":
@@ -1408,6 +1445,13 @@ func dtext(f: Font, pos: Vector2, text: String, align: int, width: float, size: 
 	draw_string(f, pos, text, align, width, int(round(float(size) * ui_text_scale)), color)
 
 
+# Draw a square icon centered at `center`, side `sz`, rotated `rot` radians (PI = flipped).
+func draw_icon(tex: Texture2D, center: Vector2, sz: float, rot: float) -> void:
+	draw_set_transform(center, rot, Vector2.ONE)
+	draw_texture_rect(tex, Rect2(-sz * 0.5, -sz * 0.5, sz, sz), false)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
 func _draw_hud(font: Font) -> void:
 	var vp := get_viewport_rect().size
 	# Resource readouts appear only once they matter: star dust at ring 2, star core at ring 3.
@@ -1447,6 +1491,32 @@ func _draw_hud(font: Font) -> void:
 		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_lose)
 	elif banner_timer > 0.0:
 		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_info)
+
+	# One-time ring-nav hint — "PRESS [↑] AND [↓]" with the arrow icons standing in for the
+	# words. Laid out by hand (text + icon + text + icon + text) and centered along the top.
+	if nav_hint_show:
+		var hfs := int(round(22.0 * ui_text_scale))
+		var hcol: Color = style.banner_info
+		var p_pre := "PRESS ["
+		var p_mid := "] AND ["
+		var p_end := "]"
+		var asc := font.get_ascent(hfs)
+		var isz := float(hfs) * 1.2   # arrow side ≈ text cap height
+		var w_pre := font.get_string_size(p_pre, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
+		var w_mid := font.get_string_size(p_mid, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
+		var w_end := font.get_string_size(p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
+		var hx := sc.x - (w_pre + isz + w_mid + isz + w_end) * 0.5
+		var hbase := 60.0 + asc          # text baseline
+		var hmid := 60.0 + asc * 0.55    # icon vertical center, roughly on the text's midline
+		draw_string(font, Vector2(hx, hbase), p_pre, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
+		hx += w_pre
+		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, 0.0)
+		hx += isz
+		draw_string(font, Vector2(hx, hbase), p_mid, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
+		hx += w_mid
+		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, PI)
+		hx += isz
+		draw_string(font, Vector2(hx, hbase), p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
 
 	if shop_open:
 		draw_shop_modal(font)
