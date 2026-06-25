@@ -11,12 +11,15 @@ extends Node2D
 # swatches live in the inspector) to reskin the whole game without touching gameplay.
 @export var style: VisualStyle
 
+# All in-game text uses this font (Quantico). Swap the weight in the inspector if desired.
+@export var ui_font: Font
+
 # ── Rings ──────────────────────────────────────────────────
 @export var base_radius := 180.0
 @export var ring_gap := 300.0
 @export var planet_radius := 40.0
 @export var planet_grow_step := 14.0    # planet heals a step per ring sealed
-@export var moon_radius := 12.0
+@export var moon_radius := 10.0    # matches the boost-light point size (the moon is a cyan one)
 @export var traverse_time := 2.0
 @export var traverse_cost := 200.0
 @export var view_margin := 0.80
@@ -63,6 +66,7 @@ extends Node2D
 # ── Core / squares ─────────────────────────────────────────
 @export var core_start := 5.0
 @export var core_cap := 5.0
+@export var core_color_max := 80.0      # core value at which the core glows full light-color (the upgrade ceiling)
 @export var feed_per_square := 5.0
 @export var material_max := 1             # squares on the ring (doubles per upgrade)
 @export var square_ready_time := 1.0      # s a freshly-spawned square fades in before it's grabbable
@@ -96,6 +100,10 @@ extends Node2D
 # ── Blaster ────────────────────────────────────────────────
 @export var beam_width := 0.12          # rad half-width of the laser
 @export var beam_drain := 3.0           # core/s while firing
+
+# ── Standardized look (purple + cyan) ──────────────────────
+@export var grid_glow_radius := 240.0   # screen px: grid lines within this of the moon brighten
+@export var grid_glow_strength := 0.8   # extra alpha added to grid lines right under the moon
 
 # ── State ──────────────────────────────────────────────────
 var phase := "play"      # play | dead | won
@@ -148,6 +156,8 @@ var hub_pending := false      # arrived at hub; shop opens once enemies are clea
 var asteroid_respawn := 0.0
 var square_respawn := 0.0
 var paused := false
+var confirm_reset := false   # R opens an "are you sure?" overlay before actually resetting
+var confirm_hit: Array = []  # clickable Yes/No regions in the confirm overlay
 var space_cd := 0.0
 var shop_open := false
 var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, action, list, idx }
@@ -178,6 +188,8 @@ var _base := {}   # snapshot of upgrade-modified export bases (so reset honors t
 func _ready() -> void:
 	if style == null:
 		style = VisualStyle.new()   # defaults reproduce the original look
+	if ui_font == null:
+		ui_font = load("res://assets/fonts/Quantico/Quantico-Regular.ttf")
 	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
 	# (reset() restores from here instead of hardcoded duplicates).
 	_base = {
@@ -217,7 +229,7 @@ func econ_nodes() -> Array:
 		{ "id":"ecore4", "name":"More core capacity IV",   "req":"ecore3", "cost":16, "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
 		{ "id":"efast1", "name":"Faster lights",           "req":"eb1",            "cost":6,  "eff":"fast1", "cur":"sq", "desc":"Lights respawn faster (1.5s)" },
 		{ "id":"efast2", "name":"Faster lights II",        "req":"efast1",         "cost":12, "eff":"fast2", "cur":"sq", "desc":"Lights respawn faster (1.0s)" },
-		{ "id":"edual",  "name":"Double lights",           "req":["efast1","eb2"], "cost":11, "mat":1, "eff":"dual",  "cur":"sq", "desc":"Two boost lights at once (+1 mat)" },
+		{ "id":"edual",  "name":"Double lights",           "req":["efast1","eb2"], "cost":11, "mat":1, "eff":"dual",  "cur":"sq", "desc":"Two boost lights at once (+1 comet)" },
 		{ "id":"eb2",    "name":"Boost light II",          "req":"eb1",    "cost":10, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"eb3",    "name":"Boost light III",         "req":"eb2",    "cost":20, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"einv2",  "name":"More square capacity II", "req":"einv1",  "cost":3,  "amt":4, "eff":"inv", "cur":"sq", "desc":"Carry up to 10 squares" },
@@ -302,6 +314,8 @@ func reset() -> void:
 	asteroid_respawn = 0.0
 	square_respawn = 0.0
 	paused = false
+	confirm_reset = false
+	confirm_hit.clear()
 	shop_open = false
 	shop_hit.clear()
 	has_horns = false
@@ -505,7 +519,7 @@ func _process(delta: float) -> void:
 	if phase == "won" or phase == "dead":
 		queue_redraw()
 		return
-	if paused or shop_open:
+	if paused or shop_open or confirm_reset:
 		beam_on = false
 		queue_redraw()
 		return
@@ -751,6 +765,16 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		return
 	var k := (event as InputEventKey).keycode
 
+	# "Are you sure?" overlay swallows all input until answered.
+	if confirm_reset:
+		match k:
+			KEY_Y, KEY_ENTER, KEY_KP_ENTER:
+				confirm_reset = false
+				reset()
+			KEY_N, KEY_ESCAPE, KEY_R:
+				confirm_reset = false
+		return
+
 	# Upgrade modal: only buying + back + restart.
 	if shop_open:
 		match k:
@@ -761,7 +785,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				elif unlocked >= 3 and idx - shop_sq.size() < shop_bt.size():
 					buy(shop_bt[idx - shop_sq.size()])
 			KEY_B: shop_open = false
-			KEY_R: reset()
+			KEY_R: confirm_reset = true
 		return
 
 	match k:
@@ -796,21 +820,41 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			if phase == "play":
 				paused = not paused
 		KEY_R:
-			reset()
+			# Mid-run, confirm first (accidental restarts hurt). On win/lose, just restart.
+			if phase == "play" and started:
+				confirm_reset = true
+			else:
+				reset()
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Mouse clicks in the upgrade modal (buy rows / back button).
-	if not shop_open:
+	if not (event is InputEventMouseButton and event.pressed and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT):
 		return
-	if event is InputEventMouseButton and event.pressed and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
-		var mp := (event as InputEventMouseButton).position
+	var mp := (event as InputEventMouseButton).position
+
+	# "Are you sure?" overlay — Yes / No buttons.
+	if confirm_reset:
+		for h in confirm_hit:
+			if (h.rect as Rect2).has_point(mp):
+				confirm_reset = false
+				if h.action == "yes":
+					reset()
+				return
+		return
+
+	# Upgrade modal: buy rows / back button.
+	if shop_open:
 		for h in shop_hit:
 			if (h.rect as Rect2).has_point(mp):
 				match h.action:
 					"back": shop_open = false
 					"buy": buy(shop_sq[h.idx] if h.list == "sq" else shop_bt[h.idx])
 				return
+		return
+
+	# Pause toggle via the corner icon (Pleenko-style clickable pause button).
+	if phase == "play" and started and pause_btn_rect().has_point(mp):
+		paused = not paused
 
 
 func can_shop() -> bool:
@@ -929,7 +973,7 @@ func try_boost() -> bool:
 			if ast.hits_left <= 0:
 				asteroid_mats += 1
 				asteroid_respawn = asteroid_respawn_delay
-				popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
+				popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
 		if hit_ast:
 			asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 	return did
@@ -1001,13 +1045,16 @@ func buy(node: Dictionary) -> void:
 
 # ── Rendering ──────────────────────────────────────────────
 func _draw() -> void:
-	_draw_background()   # full-viewport sky/stars/silhouette (no-op when style bg is transparent)
-	var font := ThemeDB.fallback_font
+	var font: Font = ui_font
 	var t := speed_t()
 	# Camera: view_scale frames the ring; cam_zoom/cam_focus add the near-seal punch-in.
 	var z := view_scale * cam_zoom
 	var c := screen_center() + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * shake * 9.0 - cam_focus * z
-	var spd_col := style.spd_slow.lerp(style.spd_fast, t)
+	# Background first (behind the world); the grid line-shine follows the moon and each enemy.
+	var glow_pts: Array = [{ "pos": c + moon_world() * z, "tint": Color(1, 1, 1) }]
+	for tr in threats:
+		glow_pts.append({ "pos": c + ring_point(tr.radius, tr.angle) * z, "tint": style.ring_locked })
+	_draw_background(glow_pts)
 
 	# Rings (sealed = bright ring, unsealed-unlocked = dim, locked = very dim).
 	for i in 3:
@@ -1021,7 +1068,7 @@ func _draw() -> void:
 		else:
 			draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_locked)
 
-	# The comet tail: yellow particles the moon drops as it flies; they linger and fade.
+	# The comet tail: cyan particles the moon drops as it flies; they linger and fade.
 	for cp in comet:
 		var cpos: Vector2 = cp.pos
 		var clf: float = cp.life
@@ -1032,20 +1079,19 @@ func _draw() -> void:
 		col.a = style.tail.a * fa
 		draw_circle(c + cpos * z, comet_dot * z * (0.4 + 0.6 * fa), col)
 
-	# Planet — heals (grows + brightens) with rings sealed.
-	var pcol := style.planet_sick.lerp(style.planet_healed, float(sealed_count()) / 3.0)
-	draw_circle(c, planet_draw_radius() * z, pcol)
-
-	# Core health bar beneath the planet — only once the core exists (ring 2+).
+	# Core — a filled disc (no outline) whose color + emission ramp from the darkest background
+	# (low) up to the light's color at the ceiling (core_color_max), so it brightens/darkens with
+	# health. A rounded fill healthbar beneath shows current core / capacity.
+	var pr := planet_draw_radius() * z
+	var energy := clampf(core / maxf(1.0, core_color_max), 0.0, 1.0)
+	for gi in range(5, 0, -1):
+		var lt := float(gi) / 5.0
+		var gc := style.light_idle
+		gc.a = energy * 0.55 * (1.0 - lt) * (1.0 - lt)   # strong emission only when energized
+		draw_circle(c, pr * (1.0 + 1.4 * lt), gc)
+	draw_circle(c, pr, style.bg_top.lerp(style.light_idle, energy))
 	if unlocked >= 2:
-		var cbw := 170.0
-		var cby := c.y + planet_draw_radius() * z + 16.0
-		var cbx := c.x - cbw * 0.5
-		var cfrac := clampf(core / core_cap, 0.0, 1.0)
-		draw_rect(Rect2(cbx - 2, cby - 2, cbw + 4, 16.0), style.core_bar_border)
-		draw_rect(Rect2(cbx, cby, cbw, 12.0), style.core_bar_bg)
-		draw_rect(Rect2(cbx, cby, cbw * cfrac, 12.0), style.core_bar_low.lerp(style.core_bar_full, cfrac))
-		dtext(font,Vector2(cbx, cby + 27.0), "CORE %d/%d" % [int(core), int(core_cap)], HORIZONTAL_ALIGNMENT_CENTER, cbw, 13, style.core_text)
+		draw_fill_bar(c.x, c.y + pr + 18.0, 190.0, 16.0, clampf(core / maxf(0.01, core_cap), 0.0, 1.0), style.light_idle)
 
 	# Shop is blocked by living enemies: prompt above the planet while waiting at the hub.
 	if hub_pending and not shop_open and current_ring == 0 and not threats.is_empty():
@@ -1060,51 +1106,59 @@ func _draw() -> void:
 		draw_glow_line(p_in, p_out, style.beam_outer, (beam_width * 2.0) * 80.0 * z)
 		draw_line(p_in, p_out, style.beam_core, 3.0)
 
-	# Squares (middle ring) — gray while not yet grabbable, cyan once ready.
+	# Star dust (middle ring) — bright purple diffuse points; dim while fading in.
 	for i in materials.size():
 		var m: Dictionary = materials[i]
 		var mp := c + ring_point(ring_r(1), m.angle) * z
-		var msz := 11.0 * z
+		var rr := 7.0 * z
 		var scol: Color
 		if m.ready > 0.0:
-			scol = style.square_pending   # fading in until ready
+			scol = style.square_pending   # fading in until grabbable
 			scol.a = style.square_pending.a * clampf(1.0 - m.ready / maxf(0.01, square_ready_time), 0.25, 1.0)
+			rr *= 0.7
 		else:
 			scol = style.square_ready     # grabbable
-		draw_rect(Rect2(mp - Vector2(msz, msz) * 0.5, Vector2(msz, msz)), scol)
+		draw_point_glow(mp, rr, scol)
 
-	# Asteroids.
+	# Asteroids — cyan diffuse points (like star dust), with their hit counter.
 	for ast in asteroids:
 		var aa: float = ast.angle
 		var hl: int = ast.hits_left
 		var ap := c + ring_point(ring_r(2), aa) * z
-		draw_circle(ap, asteroid_radius * z, style.asteroid)
+		draw_point_glow(ap, asteroid_radius * 0.8 * z, style.asteroid)
 		dtext(font,ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.asteroid_text)
 
-	# Threats (siphoners).
+	# Threats (siphoners) — magenta cursor arrows pointing at the planet they hunt.
 	for tr in threats:
 		var trad: float = tr.radius
 		var latched: bool = tr.latched
 		var tp := c + ring_point(trad, tr.angle) * z
 		var tcol := style.threat_flying if not latched else style.threat_latched
 		var rad := threat_radius * z
-		draw_colored_polygon([tp + Vector2(0, -rad), tp + Vector2(rad, 0), tp + Vector2(0, rad), tp + Vector2(-rad, 0)], tcol)
+		var toward: float = tr.angle + PI   # cursor tip faces inward, toward the core
+		if latched:
+			# Siphoning: a soft pulse + a "sucking" laser drawn from the planet into the cursor.
+			var pulse := 0.5 + 0.5 * sin(game_time * 6.0 + tr.angle * 3.0)
+			var pin := c + ring_point(planet_draw_radius(), tr.angle) * z
+			var beam := tcol
+			beam.a = 0.28 + 0.45 * pulse
+			draw_glow_line(pin, tp, beam, (3.0 + 4.0 * pulse) * z)
+			rad *= 1.0 + 0.18 * pulse
+		draw_cursor(tp, rad, toward, tcol)
 		var thp: int = tr.hp
 		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.threat_text)
 
-	# Lights.
+	# Lights — a bright yellow point on the ring at the gate. A touch bigger than star dust
+	# so it's easy to spot and hit. Brightens + grows a little when you're in it.
 	for i in lights.size():
 		var ang: float = lights[i]
-		var lr := display_radius * z
-		var half_ang := gate_dist / maxf(1.0, display_radius)   # constant-distance window
 		var on: bool = display_radius * absf(wrapf(angle - ang, -PI, PI)) <= gate_dist
-		var idle_col := style.light_dying if light_dying() else style.light_idle   # orange as the core dies
+		var idle_col := style.light_dying if light_dying() else style.light_idle   # warns (orange) as the core dies
 		var col := style.light_on if on else idle_col
-		var zone := col
-		zone.a = style.light_zone_alpha
-		draw_arc(c, lr, ang - half_ang, ang + half_ang, 14, zone, 8.0)
-		var dir := Vector2(cos(ang), sin(ang))
-		draw_glow_line(c + dir * (lr - 14.0), c + dir * (lr + 14.0), col, 4.0)
+		var pulse := 0.5 + 0.5 * sin(game_time * 4.0 + ang * 2.0)
+		var lp := c + ring_point(display_radius, ang) * z
+		var r := (10.0 + (2.5 if on else 0.0) + 1.5 * pulse) * z
+		draw_point_glow(lp, r, col)
 
 	for fl in flashes:
 		var fa := clampf(fl.life / 0.6, 0.0, 1.0)
@@ -1113,39 +1167,38 @@ func _draw() -> void:
 		flcol.a = style.flash.a * fa
 		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, flcol, 3.0)
 
-	# Flying squares (feed animation).
+	# Flying star dust (feed animation).
 	for f in flying:
 		var fst: Vector2 = f.start
 		var fft: float = f.t
 		var wpos := fst.lerp(Vector2.ZERO, fft)
-		var fsz := 9.0 * z * (1.0 - 0.4 * fft)
-		draw_rect(Rect2(c + wpos * z - Vector2(fsz, fsz) * 0.5, Vector2(fsz, fsz)), style.square_ready)
+		var fr := 6.0 * z * (1.0 - 0.4 * fft)
+		draw_point_glow(c + wpos * z, fr, style.square_ready)
 
-	# Carried squares trailing the moon.
+	# Carried star dust trailing the moon.
 	var carried := mini(inventory, 8)
 	for j in carried:
 		var idx := trail.size() - 2 - j * 3
 		if idx >= 0:
 			var tpos: Vector2 = trail[idx]
-			var sp := c + tpos * z
-			var ssz := 8.0 * z
-			draw_rect(Rect2(sp - Vector2(ssz, ssz) * 0.5, Vector2(ssz, ssz)), style.square_ready)
+			draw_point_glow(c + tpos * z, 5.0 * z, style.square_ready)
 
-	# Moon (the comet head).
-	draw_glow_circle(c + moon_world() * z, moon_radius * z, style.moon_slow.lerp(style.moon_fast, t))
+	# Moon (the comet head) — the same glowing point as the boost lights, but kept cyan.
+	var mpulse := 0.5 + 0.5 * sin(game_time * 4.0)
+	draw_point_glow(c + moon_world() * z, (moon_radius + 1.5 * mpulse) * z, style.moon_slow.lerp(style.moon_fast, t))
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
 		dtext(font, c + pu.pos * z + Vector2(-110, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 220, pu.size, Color(1, 1, 1, qa))
 
-	_draw_hud(font, spd_col)
+	_draw_hud(font)
 
 
 # ── Reskin render helpers ──────────────────────────────────
 # Full-viewport background painted before the world. No-op for the base look (bg colors
 # are transparent). Reskins set bg_top/bg_bottom for a sky gradient, and optionally a
 # starfield or a silhouette treeline.
-func _draw_background() -> void:
+func _draw_background(glow_points: Array) -> void:
 	var vp := get_viewport_rect().size
 	if style.bg_top.a > 0.0 or style.bg_bottom.a > 0.0:
 		var n := maxi(1, style.bg_bands)
@@ -1158,7 +1211,7 @@ func _draw_background() -> void:
 				col = style.bg_top.lerp(style.bg_bottom, f)
 			draw_rect(Rect2(0.0, vp.y * float(i) / float(n), vp.x, vp.y / float(n) + 1.0), col)
 	if style.enable_grid:
-		_draw_grid(vp)
+		_draw_grid(vp, glow_points)
 	if style.enable_starfield:
 		_draw_starfield(vp)
 	if style.enable_shooting_stars:
@@ -1167,7 +1220,8 @@ func _draw_background() -> void:
 		_draw_treeline(vp)
 
 
-func _draw_grid(vp: Vector2) -> void:
+func _draw_grid(vp: Vector2, glow_points: Array) -> void:
+	# Faint, uniform neon grid.
 	var sp := maxf(8.0, style.grid_spacing)
 	var x := 0.0
 	while x <= vp.x:
@@ -1177,6 +1231,40 @@ func _draw_grid(vp: Vector2) -> void:
 	while y <= vp.y:
 		draw_line(Vector2(0, y), Vector2(vp.x, y), style.grid_color, 1.0)
 		y += sp
+	# Each glow point (the moon, plus every enemy) shines the grid patch around it.
+	for gp in glow_points:
+		_grid_shine(vp, sp, gp.pos, gp.tint)
+
+
+# Local shine: only the patch of grid right around `center` brightens (2D falloff), drawn as
+# short segments so whole lines don't light up — just the area the source is over.
+func _grid_shine(vp: Vector2, sp: float, center: Vector2, tint: Color) -> void:
+	var rad := maxf(1.0, grid_glow_radius)
+	var step := 16.0
+	var gx := ceilf((center.x - rad) / sp) * sp
+	while gx <= center.x + rad:
+		if gx >= 0.0 and gx <= vp.x:
+			var yy := center.y - rad
+			while yy <= center.y + rad:
+				var k := clampf(1.0 - Vector2(gx, yy + step * 0.5).distance_to(center) / rad, 0.0, 1.0)
+				if k > 0.02:
+					var col := style.grid_color.lerp(Color(tint.r, tint.g, tint.b, style.grid_color.a), 0.3 * k)
+					col.a = clampf(grid_glow_strength * k, 0.0, 1.0)
+					draw_line(Vector2(gx, yy), Vector2(gx, yy + step), col, 1.0 + k * 1.5)
+				yy += step
+		gx += sp
+	var gy := ceilf((center.y - rad) / sp) * sp
+	while gy <= center.y + rad:
+		if gy >= 0.0 and gy <= vp.y:
+			var xx := center.x - rad
+			while xx <= center.x + rad:
+				var k := clampf(1.0 - Vector2(xx + step * 0.5, gy).distance_to(center) / rad, 0.0, 1.0)
+				if k > 0.02:
+					var col := style.grid_color.lerp(Color(tint.r, tint.g, tint.b, style.grid_color.a), 0.3 * k)
+					col.a = clampf(grid_glow_strength * k, 0.0, 1.0)
+					draw_line(Vector2(xx, gy), Vector2(xx + step, gy), col, 1.0 + k * 1.5)
+				xx += step
+		gy += sp
 
 
 func _draw_shooting_stars(vp: Vector2) -> void:
@@ -1262,63 +1350,95 @@ func draw_glow_line(a: Vector2, b: Vector2, col: Color, base_w: float) -> void:
 	draw_line(a, b, col, base_w)
 
 
+# A bright point wrapped in lots of soft diffuse light (star dust / asteroids / gate blooms).
+# Always on (palette-driven), independent of glow_enable so these objects read as "lit".
+func draw_point_glow(pos: Vector2, r: float, col: Color) -> void:
+	var layers := 5
+	for i in range(layers, 0, -1):
+		var lt := float(i) / float(layers)
+		var gc := col
+		gc.a = col.a * 0.30 * (1.0 - lt) * (1.0 - lt)
+		draw_circle(pos, r * (1.0 + 3.0 * lt), gc)
+	var mid := col
+	mid.a = col.a * 0.85
+	draw_circle(pos, r, mid)
+	draw_circle(pos, r * 0.5, col.lerp(Color(1, 1, 1, col.a), 0.5))   # whitened lit core
+
+
+# A rounded fill bar (borrowed from Pleenko's FillBar look): dark rounded track + a rounded
+# fill that grows with `frac`. Centered horizontally on `cx`, top at `top_y`.
+func draw_fill_bar(cx: float, top_y: float, w: float, h: float, frac: float, fill_col: Color) -> void:
+	var x := cx - w * 0.5
+	_capsule(x - 2.0, top_y - 2.0, w + 4.0, h + 4.0, Color(0.03, 0.02, 0.06, 0.92))   # border
+	_capsule(x, top_y, w, h, Color(0.12, 0.1, 0.18, 1.0))                              # track
+	var fw := clampf(frac, 0.0, 1.0) * w
+	if fw >= h:
+		_capsule(x, top_y, fw, h, fill_col)
+	elif fw > 0.0:
+		draw_circle(Vector2(x + h * 0.5, top_y + h * 0.5), h * 0.5 * (fw / h), fill_col)
+
+
+# A horizontal capsule (rect with rounded ends) — the rounded-corner look of a Pleenko bar.
+func _capsule(x: float, y: float, w: float, h: float, col: Color) -> void:
+	var r := h * 0.5
+	if w <= h:
+		draw_circle(Vector2(x + w * 0.5, y + r), minf(r, w * 0.5), col)
+		return
+	draw_rect(Rect2(x + r, y, w - h, h), col)
+	draw_circle(Vector2(x + r, y + r), r, col)
+	draw_circle(Vector2(x + w - r, y + r), r, col)
+
+
+# A skinny triangle OUTLINE (no fill), tip pointing along `rot`. Used for siphoner enemies.
+# Outline drawn at the unsealed-ring thickness; its "glow" comes from the background line-shine.
+func draw_cursor(pos: Vector2, s: float, rot: float, col: Color) -> void:
+	var ca := cos(rot)
+	var sa := sin(rot)
+	var local := [Vector2(s, 0.0), Vector2(-s * 0.72, -s * 0.6), Vector2(-s * 0.72, s * 0.6)]
+	var pts := PackedVector2Array()
+	for p in local:
+		pts.append(pos + Vector2(p.x * ca - p.y * sa, p.x * sa + p.y * ca))
+	pts.append(pts[0])   # close the loop
+	draw_polyline(pts, col, style.ring_w_locked)
+
+
 # Scaled text helper — same arg order as draw_string, but the font size is multiplied by
 # ui_text_scale. Used everywhere except the shop modal (its layout is sized to fixed fonts).
 func dtext(f: Font, pos: Vector2, text: String, align: int, width: float, size: int, color: Color) -> void:
 	draw_string(f, pos, text, align, width, int(round(float(size) * ui_text_scale)), color)
 
 
-func _draw_hud(font: Font, spd_col: Color) -> void:
+func _draw_hud(font: Font) -> void:
 	var vp := get_viewport_rect().size
-	dtext(font, Vector2(22, 56), "SPEED %d" % int(speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 40, spd_col)
-	dtext(font, Vector2(22, 120), "SQUARES %d/%d      MAT %d" % [inventory, max_inventory, asteroid_mats],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, style.hud_text)
-	# Seal hint: how close the tail is to wrapping the current ring.
-	if phase == "play" and current_ring < unlocked and not sealed[current_ring] and not moving:
-		var pct := int(clampf(tail_span() / TAU, 0.0, 1.0) * 100.0)
-		dtext(font, Vector2(22, 168), "SEAL RING %d: tail %d%%" % [current_ring + 1, pct],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, style.hud_seal_hint)
+	# Resource readouts appear only once they matter: star dust at ring 2, star core at ring 3.
+	var res := ""
+	if unlocked >= 2:
+		res = "STAR DUST %d/%d" % [inventory, max_inventory]
+	if unlocked >= 3:
+		res += "      COMETS %d" % asteroid_mats
+	if res != "":
+		dtext(font, Vector2(22, 56), res, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, style.hud_text)
 	# Core too low to make lights: head home to refill (it won't kill you, just dries up).
 	if phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
-		dtext(font, Vector2(22, 212), "CORE LOW — RETURN HOME TO REFILL",
+		dtext(font, Vector2(22, 104), "CORE LOW — RETURN HOME TO REFILL",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 17, style.hud_warn)
 
-	# Enemy spawn clock (Pleenko-style pie slice that depletes clockwise), on the left.
-	if enemy_active:
-		var ck := Vector2(90, 320)
-		var cr := 48.0
-		var secs := maxi(0, ceili(threat_timer))
-		var total := enemy_interval(threat_spawn_count)
-		var frac := clampf(float(secs) / maxf(1.0, total), 0.0, 1.0)
-		draw_arc(ck, cr, 0.0, TAU, 48, style.clock_ring, 3.0)
-		if frac > 0.0:
-			var pts := PackedVector2Array([ck])
-			var sweep := TAU * frac
-			for i in 33:
-				var a := -PI / 2.0 + sweep * (float(i) / 32.0)
-				pts.append(ck + Vector2(cos(a), sin(a)) * cr)
-			draw_colored_polygon(pts, style.clock_fill)
-		dtext(font, ck + Vector2(-cr, 14), str(secs), HORIZONTAL_ALIGNMENT_CENTER, cr * 2.0, 26, style.clock_text)
-		var cnt := enemy_count(threat_spawn_count)
-		var etext := ("%d enemy will spawn" if cnt == 1 else "%d enemies will spawn") % cnt
-		dtext(font, Vector2(ck.x - 200, ck.y + cr + 34.0), etext, HORIZONTAL_ALIGNMENT_CENTER, 400, 17, style.enemy_warn)
-
-	# Game timer (top-right corner).
-	var mins := int(game_time) / 60
-	var secs := int(game_time) % 60
-	dtext(font, Vector2(vp.x - 170, 44), "%d:%02d" % [mins, secs], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, style.hud_timer)
-
-	# Controls hint (top-right, under the timer).
-	var hint := "SPACE boost/grab   UP/DOWN rings   1-8 buy (hub)   P pause"
-	if has_blasters:
-		hint += "   hold F: blaster"
-	hint += "   R restart"
-	dtext(font, Vector2(vp.x - 1320, 104), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, style.hud_dim)
+	# Clickable pause button (top-right). Pause bars while playing; play triangle while paused.
+	if phase == "play" and started and not shop_open and not confirm_reset:
+		var r := pause_btn_rect()
+		draw_rect(r, Color(0.1, 0.06, 0.18, 0.5))
+		var bc := r.position + r.size * 0.5
+		if paused:
+			var ps := r.size.x * 0.24
+			draw_colored_polygon(PackedVector2Array([bc + Vector2(-ps * 0.7, -ps), bc + Vector2(ps, 0), bc + Vector2(-ps * 0.7, ps)]), style.banner_pause)
+		else:
+			draw_pause_bars(bc, r.size.x * 0.26, style.banner_pause)
 
 	var sc := screen_center()
 	# Centered banners — CENTER alignment in a wide box so they stay centered at any text scale.
 	if paused:
-		dtext(font, sc + Vector2(-500, -180), "PAUSED  (P)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_pause)
+		draw_rect(Rect2(0, 0, vp.x, vp.y), Color(0, 0, 0, 0.45))   # dim the world
+		draw_pause_bars(sc + Vector2(0, -40), 46.0, style.banner_pause)
 	elif not started and phase == "play":
 		dtext(font, sc + Vector2(-500, -180), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_CENTER, 1000, 26, style.banner_launch)
 	elif phase == "won":
@@ -1330,6 +1450,52 @@ func _draw_hud(font: Font, spd_col: Color) -> void:
 
 	if shop_open:
 		draw_shop_modal(font)
+	if confirm_reset:
+		draw_confirm_modal(font)
+
+
+# Two vertical bars (the pause glyph borrowed from Pleenko's pause icon), centered on `center`.
+func draw_pause_bars(center: Vector2, h: float, col: Color) -> void:
+	var bw := h * 0.36
+	var gap := h * 0.30
+	draw_rect(Rect2(center.x - gap - bw, center.y - h, bw, h * 2.0), col)
+	draw_rect(Rect2(center.x + gap, center.y - h, bw, h * 2.0), col)
+
+
+func pause_btn_rect() -> Rect2:
+	var vp := get_viewport_rect().size
+	var s := 46.0
+	return Rect2(vp.x - s - 26.0, 26.0, s, s)
+
+
+# "Are you sure?" overlay shown when R is pressed mid-run (Pleenko-style restart confirm).
+func draw_confirm_modal(font: Font) -> void:
+	confirm_hit.clear()
+	var vp := get_viewport_rect().size
+	draw_rect(Rect2(0, 0, vp.x, vp.y), Color(0, 0, 0, 0.72))
+	var pw := 560.0
+	var ph := 250.0
+	var px := (vp.x - pw) * 0.5
+	var py := (vp.y - ph) * 0.5
+	draw_rect(Rect2(px - 3, py - 3, pw + 6, ph + 6), style.banner_pause)   # cyan border
+	draw_rect(Rect2(px, py, pw, ph), Color(0.08, 0.05, 0.14, 0.99))
+	draw_string(font, Vector2(px, py + 76), "ARE YOU SURE?", HORIZONTAL_ALIGNMENT_CENTER, pw, 40, style.banner_pause)
+	draw_string(font, Vector2(px, py + 116), "Restart — all progress will be lost.", HORIZONTAL_ALIGNMENT_CENTER, pw, 22, Color(0.7, 0.75, 0.85))
+
+	var bw := 210.0
+	var bh := 58.0
+	var gap := 36.0
+	var by := py + ph - bh - 28.0
+	var yx := px + (pw - (bw * 2.0 + gap)) * 0.5
+	var nx := yx + bw + gap
+	var yrect := Rect2(yx, by, bw, bh)
+	var nrect := Rect2(nx, by, bw, bh)
+	draw_rect(yrect, Color(0.5, 0.16, 0.34))   # restart
+	draw_rect(nrect, Color(0.14, 0.32, 0.4))   # cancel
+	draw_string(font, Vector2(yx, by + 38), "[Y]  RESTART", HORIZONTAL_ALIGNMENT_CENTER, bw, 26, Color(1, 1, 1))
+	draw_string(font, Vector2(nx, by + 38), "[N]  CANCEL", HORIZONTAL_ALIGNMENT_CENTER, bw, 26, Color(1, 1, 1))
+	confirm_hit.append({ "rect": yrect, "action": "yes" })
+	confirm_hit.append({ "rect": nrect, "action": "no" })
 
 
 func draw_shop_modal(font: Font) -> void:
@@ -1352,7 +1518,7 @@ func draw_shop_modal(font: Font) -> void:
 	draw_rect(Rect2(px - 3, py - 3, pw + 6, ph + 6), Color(0.45, 0.55, 0.75))   # border
 	draw_rect(Rect2(px, py, pw, ph), Color(0.09, 0.10, 0.14, 0.99))
 	draw_string(font, Vector2(px, py + 48), "UPGRADES", HORIZONTAL_ALIGNMENT_CENTER, pw, 36, Color(1, 1, 0.8))
-	draw_string(font, Vector2(px, py + 88), "SQUARES %d/%d        MAT %d        CORE %d/%d" % [inventory, max_inventory, asteroid_mats, int(core), int(core_cap)],
+	draw_string(font, Vector2(px, py + 88), "STAR DUST %d/%d        COMETS %d        CORE %d/%d" % [inventory, max_inventory, asteroid_mats, int(core), int(core_cap)],
 		HORIZONTAL_ALIGNMENT_CENTER, pw, 22, Color(0.78, 0.85, 0.95))
 
 	var y := py + head_h
@@ -1382,9 +1548,9 @@ func _modal_section(font: Font, header: String, items: Array, cur: String, px: f
 		draw_rect(rect, Color(0.15, 0.24, 0.18) if afford else Color(0.16, 0.18, 0.23))
 		var name_col := Color(0.96, 0.98, 0.96) if afford else Color(0.72, 0.72, 0.78)
 		draw_string(font, rect.position + Vector2(16, 30), "[%d]  %s" % [key_base + i, item.name], HORIZONTAL_ALIGNMENT_LEFT, -1, 23, name_col)
-		var cost_label := "%d %s" % [int(item.cost), "sq" if cur == "sq" else "mat"]
+		var cost_label := "%d %s" % [int(item.cost), "dust" if cur == "sq" else "comet"]
 		if mat_cost > 0:
-			cost_label += " + %d mat" % mat_cost
+			cost_label += " + %d comet" % mat_cost
 		draw_string(font, rect.position + Vector2(0, 30), cost_label, HORIZONTAL_ALIGNMENT_RIGHT, rect.size.x - 18, 21, name_col)
 		draw_string(font, rect.position + Vector2(18, 50), item.get("desc", ""), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.64, 0.66, 0.72))
 		shop_hit.append({ "rect": rect, "action": "buy", "list": cur, "idx": i })
