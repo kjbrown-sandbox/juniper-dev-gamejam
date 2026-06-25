@@ -10,6 +10,8 @@ class_name VisualStyle extends Resource
 @export_group("Background")
 @export var bg_top: Color = Color(0, 0, 0, 0)        # gradient top (a=0 → no background)
 @export var bg_bottom: Color = Color(0, 0, 0, 0)     # gradient bottom
+@export var use_bg_mid := false                      # 3-stop gradient (top→mid→bottom)
+@export var bg_mid: Color = Color(0, 0, 0, 0)        # middle band (e.g. sunset pink)
 @export var bg_bands := 24                            # gradient resolution (horizontal strips)
 @export var enable_starfield := false
 @export var star_color: Color = Color(1, 1, 1, 0.6)

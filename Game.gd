@@ -1151,8 +1151,12 @@ func _draw_background() -> void:
 		var n := maxi(1, style.bg_bands)
 		for i in n:
 			var f := float(i) / float(n)
-			draw_rect(Rect2(0.0, vp.y * float(i) / float(n), vp.x, vp.y / float(n) + 1.0),
-				style.bg_top.lerp(style.bg_bottom, f))
+			var col: Color
+			if style.use_bg_mid:
+				col = style.bg_top.lerp(style.bg_mid, f * 2.0) if f < 0.5 else style.bg_mid.lerp(style.bg_bottom, (f - 0.5) * 2.0)
+			else:
+				col = style.bg_top.lerp(style.bg_bottom, f)
+			draw_rect(Rect2(0.0, vp.y * float(i) / float(n), vp.x, vp.y / float(n) + 1.0), col)
 	if style.enable_grid:
 		_draw_grid(vp)
 	if style.enable_starfield:
