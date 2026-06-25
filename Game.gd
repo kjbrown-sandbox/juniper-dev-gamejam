@@ -260,12 +260,12 @@ func econ_nodes() -> Array:
 func battle_nodes() -> Array:
 	return [
 		{ "id":"horns",    "name":"Horns",          "req":"",      "cost":2,  "eff":"horns",    "cur":"ast", "desc":"Asteroids crack in 2 hits" },
-		{ "id":"horns2",   "name":"Horns II",       "req":"horns", "cost":10, "eff":"horns2",   "cur":"ast", "desc":"Asteroids die in 1 hit, no slowdown" },
+		{ "id":"horns2",   "name":"Horns II",       "req":"horns", "cost":6,  "eff":"horns2",   "cur":"ast", "desc":"Asteroids die in 1 hit, no slowdown" },
 		{ "id":"matboost", "name":"Material boost", "req":"horns", "cost":5,  "eff":"matboost", "cur":"ast", "desc":"Press B: spend 1 square for a speed boost" },
 		{ "id":"ramming",  "name":"Ramming",       "req":"horns", "cost":3,  "eff":"ramming",  "cur":"ast", "desc":"Missed-SPACE enemy collisions deal 1 damage" },
 		{ "id":"vacuum",   "name":"Vacuum",        "req":"horns", "cost":3,  "eff":"vacuum",   "cur":"ast", "desc":"Auto-collect nearby squares, no SPACE needed" },
 		{ "id":"ast1",     "name":"More asteroids",    "req":"horns", "cost":4,  "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
-		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1",  "cost":12, "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
+		{ "id":"ast2",     "name":"More asteroids II", "req":"ast1",  "cost":7,  "eff":"asteroids", "cur":"ast", "desc":"+1 asteroid on the ring" },
 	]
 
 
