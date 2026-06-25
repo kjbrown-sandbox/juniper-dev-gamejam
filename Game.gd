@@ -29,7 +29,7 @@ extends Node2D
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
 @export var reveal_dur := 1.8           # s the camera zooms out to show the newly opened ring
-@export var gate_dist := 105.0          # px along the ring to accept a light (same on every ring)
+@export var gate_dist := 70.0          # px along the ring to accept a light (same on every ring)
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
 @export var light_cost := 1.0
@@ -61,7 +61,7 @@ extends Node2D
 @export var feed_per_square := 5.0
 @export var material_max := 1             # squares on the ring (doubles per upgrade)
 @export var square_ready_time := 1.0      # s a freshly-spawned square fades in before it's grabbable
-@export var pickup_radius := 135.0
+@export var pickup_radius := 90.0       # base SPACE reach for squares (scaled by reach_mult())
 @export var deposit_interval := 0.12
 @export var suck_time := 0.45
 @export var max_inventory := 3          # most squares you can carry at once (doubles per upgrade)
@@ -73,12 +73,12 @@ extends Node2D
 @export var asteroid_speed := 1.2
 @export var asteroid_hits := 3
 @export var asteroid_hit_mult := 0.7
-@export var asteroid_tol := 0.24
+@export var asteroid_tol := 0.16
 @export var asteroid_hit_cd := 0.5
 
 # ── Siphoner threats (frontier) ────────────────────────────
 @export var threat_radius := 14.0
-@export var enemy_hit_dist := 105.0     # proximity to SPACE-hit an enemy
+@export var enemy_hit_dist := 70.0      # base SPACE reach for enemies (scaled by reach_mult())
 @export var enemy_contact_dist := 34.0  # proximity at which a passed enemy slows you (item 9)
 @export var threat_speed := 90.0
 @export var threat_hp := 2
@@ -154,6 +154,7 @@ var has_blasters := false
 var has_material_boost := false
 var has_ramming := false
 var has_vacuum := false
+var reach_level := 0      # "Larger space hit" upgrades; reach_mult() = 1 + level/6 (lvl3 = 1.5x)
 var beam_on := false
 var shop_sq: Array = []
 var shop_bt: Array = []
@@ -197,8 +198,12 @@ var bought := {}   # node id -> 1 once owned
 func econ_nodes() -> Array:
 	return [
 		{ "id":"esq",    "name":"More squares",            "req":"",       "cost":1,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
+		{ "id":"ereach1","name":"Larger space hit",        "req":"",       "cost":5,  "eff":"reach",    "cur":"sq", "desc":"Bigger SPACE reach (squares, lights, enemies, asteroids)" },
+		{ "id":"ereach2","name":"Larger space hit II",     "req":"ereach1","cost":10, "eff":"reach",    "cur":"sq", "desc":"Bigger SPACE reach" },
+		{ "id":"ereach3","name":"Larger space hit III",    "req":"ereach2","cost":15, "eff":"reach",    "cur":"sq", "desc":"Bigger SPACE reach" },
+		{ "id":"ereach4","name":"Larger space hit IV",     "req":"ereach3","cost":20, "eff":"reach",    "cur":"sq", "desc":"Bigger SPACE reach" },
 		{ "id":"ecore1", "name":"More core capacity",      "req":"esq",    "cost":2,  "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
-		{ "id":"einv1",  "name":"More square capacity",    "req":"esq",    "cost":2,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
+		{ "id":"einv1",  "name":"More square capacity",    "req":"esq",    "cost":3,  "amt":3, "eff":"inv", "cur":"sq", "desc":"Carry up to 6 squares" },
 		{ "id":"ecore2", "name":"More core capacity II",   "req":"ecore1", "cost":4,  "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
 		{ "id":"eb1",    "name":"Boost light",             "req":"ecore1", "cost":5,  "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"ecore3", "name":"More core capacity III",  "req":"ecore2", "cost":8,  "eff":"core",     "cur":"sq", "desc":"Double the core's capacity" },
@@ -208,10 +213,9 @@ func econ_nodes() -> Array:
 		{ "id":"edual",  "name":"Double lights",           "req":["efast1","eb2"], "cost":11, "mat":1, "eff":"dual",  "cur":"sq", "desc":"Two boost lights at once (+1 mat)" },
 		{ "id":"eb2",    "name":"Boost light II",          "req":"eb1",    "cost":10, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
 		{ "id":"eb3",    "name":"Boost light III",         "req":"eb2",    "cost":20, "eff":"boost",    "cur":"sq", "desc":"Light +50% speed, but +1 core/light" },
-		{ "id":"einv2",  "name":"More square capacity II", "req":"einv1",  "cost":4,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
-		{ "id":"einv3",  "name":"More square capacity III","req":"einv2",  "cost":8,  "eff":"inv",      "cur":"sq", "desc":"Carry +3 more squares" },
-		{ "id":"ebig1",  "name":"Bigger squares",          "req":"einv2",  "cost":5,  "eff":"feed",     "cur":"sq", "desc":"Each square feeds +1 more core" },
-		{ "id":"ebig2",  "name":"Bigger squares II",       "req":"ebig1",  "cost":13, "eff":"feed",     "cur":"sq", "desc":"Each square feeds +1 more core" },
+		{ "id":"einv2",  "name":"More square capacity II", "req":"einv1",  "cost":6,  "amt":4, "eff":"inv", "cur":"sq", "desc":"Carry up to 10 squares" },
+		{ "id":"einv3",  "name":"More square capacity III","req":"einv2",  "cost":10, "amt":5, "eff":"inv", "cur":"sq", "desc":"Carry up to 15 squares" },
+		{ "id":"einv4",  "name":"More square capacity IV", "req":"einv3",  "cost":15, "amt":5, "eff":"inv", "cur":"sq", "desc":"Carry up to 20 squares" },
 		{ "id":"esq2",   "name":"More squares II",         "req":"einv1",  "cost":3,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
 		{ "id":"esq3",   "name":"More squares III",        "req":"esq2",   "cost":6,  "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
 		{ "id":"esq4",   "name":"More squares IV",         "req":"esq3",   "cost":12, "eff":"material", "cur":"sq", "desc":"+1 square on the ring" },
@@ -299,6 +303,7 @@ func reset() -> void:
 	has_material_boost = false
 	has_ramming = false
 	has_vacuum = false
+	reach_level = 0
 	beam_on = false
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
@@ -378,6 +383,12 @@ func moon_world() -> Vector2:
 
 func ring_point(r: float, a: float) -> Vector2:
 	return r * Vector2(cos(a), sin(a))
+
+
+func reach_mult() -> float:
+	# SPACE-hit reach grows with "Larger space hit": +1/6 per level, so level 3 = 1.5x (the
+	# old default size), level 4 keeps the same step (1.667x).
+	return 1.0 + float(reach_level) / 6.0
 
 
 func speed_t() -> float:
@@ -600,7 +611,7 @@ func _tick_play(sim: float) -> void:
 		if has_vacuum:
 			for i in range(materials.size() - 1, -1, -1):
 				var mv: Dictionary = materials[i]
-				if mv.ready <= 0.0 and inventory < max_inventory and moon_world().distance_to(ring_point(ring_r(1), mv.angle)) < pickup_radius:
+				if mv.ready <= 0.0 and inventory < max_inventory and moon_world().distance_to(ring_point(ring_r(1), mv.angle)) < pickup_radius * reach_mult():
 					collect_square(i)
 
 
@@ -830,11 +841,35 @@ func try_boost() -> bool:
 	# Returns true if the press connected with anything (square/light/enemy/asteroid).
 	var did := false
 	var mw := moon_world()
-	# Grab EVERY square within reach (up to the carry cap). Iterate back-to-front.
+	var rm := reach_mult()   # "Larger space hit" scales every SPACE reach below
+
+	# Lights FIRST — boosting one (or several aligned at once) fires a single shockwave centered
+	# on the boosted lights, reaching 2× the square-grab radius. It sweeps squares, asteroids, and
+	# enemies in that blast (Euclidean), on top of the normal per-target reach below.
+	var shock_pts: Array[Vector2] = []
+	for i in range(lights.size() - 1, -1, -1):
+		if display_radius * absf(wrapf(angle - lights[i], -PI, PI)) <= gate_dist * rm:
+			shock_pts.append(ring_point(display_radius, lights[i]))
+			do_boost(i)
+			did = true
+	var shock := not shock_pts.is_empty()
+	var shock_r := pickup_radius * 2.0 * rm
+	var shock_c := Vector2.ZERO
+	if shock:
+		for p in shock_pts:
+			shock_c += p
+		shock_c /= float(shock_pts.size())
+		flashes.append({ "pos": shock_c, "life": 0.55, "r": shock_r })
+		shake = minf(2.0, shake + 0.5)
+		for n in 20:
+			particles.append({ "pos": shock_c, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(160.0, 380.0), "life": randf_range(0.3, 0.6) })
+
+	# Squares — normal reach from the moon, OR caught in the shockwave. Up to the carry cap.
 	for i in range(materials.size() - 1, -1, -1):
 		var m: Dictionary = materials[i]
-		if mw.distance_to(ring_point(ring_r(1), m.angle)) < pickup_radius:
-			var sp := ring_point(ring_r(1), m.angle) + Vector2(0, -26)
+		var smp := ring_point(ring_r(1), m.angle)
+		if mw.distance_to(smp) < pickup_radius * rm or (shock and shock_c.distance_to(smp) < shock_r):
+			var sp := smp + Vector2(0, -26)
 			if m.ready > 0.0:
 				popups.append({ "pos": sp, "text": "NOT READY", "life": 0.6, "size": 14 })
 				did = true
@@ -844,48 +879,50 @@ func try_boost() -> bool:
 			else:
 				collect_square(i)
 				did = true
-	# Boost on EVERY aligned light at once.
-	for i in range(lights.size() - 1, -1, -1):
-		if display_radius * absf(wrapf(angle - lights[i], -PI, PI)) <= gate_dist:
-			do_boost(i)
-			did = true
-	# SPACE-hit EVERY enemy within reach. A still-flying enemy hit mid-air (while traversing)
-	# dies instantly; a latched enemy, or any hit while on a ring, takes one normal HP.
+
+	# Enemies — normal reach (with the mid-air instakill) OR the shockwave (always a normal 1 HP).
 	var hit_enemy := false
 	for t in threats:
-		if mw.distance_to(ring_point(t.radius, t.angle)) < enemy_hit_dist:
-			var midair: bool = moving and not t.latched
-			if midair:
-				t.hp = 0
-			else:
-				t.hp -= 1
-			t.cd = asteroid_hit_cd   # a successful hit suppresses the contact-slow this pass
-			hit_enemy = true
-			did = true
-			var ep := ring_point(t.radius, t.angle)
-			shake = minf(1.8, shake + (0.5 if t.hp <= 0 else 0.25))
-			for i in (10 if t.hp <= 0 else 5):
-				particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
-			if midair:
-				popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL BONUS", "life": 0.9, "size": 18 })
+		var ep := ring_point(t.radius, t.angle)
+		var in_normal: bool = mw.distance_to(ep) < enemy_hit_dist * rm
+		var in_shock: bool = shock and shock_c.distance_to(ep) < shock_r
+		if not (in_normal or in_shock):
+			continue
+		var midair: bool = in_normal and moving and not t.latched
+		if midair:
+			t.hp = 0
+		else:
+			t.hp -= 1
+		t.cd = asteroid_hit_cd   # a successful hit suppresses the contact-slow this pass
+		hit_enemy = true
+		did = true
+		shake = minf(1.8, shake + (0.5 if t.hp <= 0 else 0.25))
+		for i in (10 if t.hp <= 0 else 5):
+			particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
+		if midair:
+			popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL BONUS", "life": 0.9, "size": 18 })
 	if hit_enemy:
 		threats = threats.filter(func(t): return t.hp > 0)
-	# SPACE-hit asteroids you're passing on ring 3 (one hit per press; the slowdown is passive).
-	if unlocked >= 3 and current_ring == 2:
+
+	# Asteroids — normal hit needs you on ring 2 within tol; the shockwave reaches any in blast range.
+	if unlocked >= 3:
 		var hit_ast := false
 		for ast in asteroids:
-			if absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
-				ast.hits_left -= 1
-				hit_ast = true
-				did = true
-				var ap := ring_point(ring_r(2), ast.angle)
-				shake = minf(1.8, shake + 0.3)
-				for i in 6:
-					particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
-				if ast.hits_left <= 0:
-					asteroid_mats += 1
-					asteroid_respawn = asteroid_respawn_delay
-					popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
+			var ap := ring_point(ring_r(2), ast.angle)
+			var in_normal_a: bool = current_ring == 2 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol * rm
+			var in_shock_a: bool = shock and shock_c.distance_to(ap) < shock_r
+			if not (in_normal_a or in_shock_a):
+				continue
+			ast.hits_left -= 1
+			hit_ast = true
+			did = true
+			shake = minf(1.8, shake + 0.3)
+			for i in 6:
+				particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
+			if ast.hits_left <= 0:
+				asteroid_mats += 1
+				asteroid_respawn = asteroid_respawn_delay
+				popups.append({ "pos": ap, "text": "+MAT", "life": 0.7, "size": 16 })
 		if hit_ast:
 			asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 	return did
@@ -939,13 +976,13 @@ func buy(node: Dictionary) -> void:
 	bought[id] = 1
 	match node.eff:
 		"material":  material_max += 1
-		"inv":       max_inventory += 3
+		"inv":       max_inventory += int(node.get("amt", 3))
+		"reach":     reach_level += 1
 		"core":      core_cap *= 2.0
 		"boost":     boost_base *= (1.0 + boost_up); light_cost += 1.0
 		"fast1":     light_delay = 1.5
 		"fast2":     light_delay = 1.0
 		"dual":      light_count = 2
-		"feed":      overflow_mult += 1
 		"horns":     has_horns = true; asteroid_hits = 2
 		"horns2":    has_horns2 = true; asteroid_hits = 1
 		"asteroids": asteroid_max += 1
@@ -1060,7 +1097,8 @@ func _draw() -> void:
 
 	for fl in flashes:
 		var fa := clampf(fl.life / 0.6, 0.0, 1.0)
-		draw_arc(c + fl.pos * z, (1.0 - fa) * 120.0 + 6.0, 0.0, TAU, 32, Color(1, 1, 1, fa), 3.0)
+		var maxr: float = fl.get("r", 120.0)   # shockwaves pass a larger radius
+		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, Color(1, 1, 1, fa), 3.0)
 
 	# Flying squares (feed animation).
 	for f in flying:
