@@ -117,3 +117,13 @@ centered `PLAY`/`SETTINGS` (pleenko-style StyleBoxFlat hover/press), and a `SETT
   the moon to start off-screen. Slow (4s). Grid reverted to from-0 (matches the in-game grid).
 - Tiny residual pops at the cut (game adds a yellow launch-boost glow + "PRESS SPACE TO LAUNCH"); the
   moon itself does not move.
+
+### Menu polish round 4 — virtual camera, moon below title
+
+- Reworked the intro as a **virtual camera** (focus + zoom) that interpolates from the menu framing
+  to the game's first frame. The moon is fixed at the world ring-top, so p=1 == Game.tscn's opening
+  exactly → seamless by construction.
+- Menu now frames the moon **below the title** (`MENU_MOON_FRAC 0.34`, above centre); ring/core are
+  off-screen (camera zoomed in) and sweep in as the camera pulls back.
+- Camera timing is **cubic ease-out** (fast at the start, slows into the landing).
+- Removed the old screen-space drop; `_draw_scene()` now serves both menu (p=0) and intro.

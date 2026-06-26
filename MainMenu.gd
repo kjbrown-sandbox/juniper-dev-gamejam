@@ -14,12 +14,13 @@ const MENU_GLOW_RADIUS := 320.0     # screen px the moon (and later the cursor) 
 const MENU_GLOW_STRENGTH := 0.8
 const DEFAULT_VOLUME := 80.0        # 0..100, session-only (no save system this jam)
 
-const MENU_MOON_FRAC := 0.08        # menu moon sits high (above the ring's top) so it can drop onto it
+const MENU_MOON_FRAC := 0.34        # menu moon's vertical screen position (below the title, above centre)
 const MENU_MOON_R := 70.0           # menu moon radius (the "huge, zoomed-in" hero)
 
 # Mirrors of Game's start geometry, so the zoom-out reveal lands EXACTLY on the game's first
 # frame (moon at the top of ring 0, planet centered) and the scene cut is invisible.
 const BASE_RADIUS := 180.0
+const WORLD_MOON_Y := -180.0        # the game's moon starts at the top of ring 0 (world (0, -base_radius))
 const PLANET_RADIUS := 40.0
 const MOON_RADIUS := 10.0           # must match Game.gd moon_radius for a seamless hand-off
 const MAX_ZOOM := 2.2
@@ -27,7 +28,6 @@ const VIEW_MARGIN := 0.80
 const INTRO_DUR := 4.0              # seconds of slow zoom-out + fall before the cut to Game.tscn
 
 var time := 0.0
-var moon_pos := Vector2.ZERO
 var volume := DEFAULT_VOLUME
 var state := "menu"                 # menu | intro
 var intro_t := 0.0
@@ -53,7 +53,6 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	time += delta
-	var vp := get_viewport_rect().size
 	if state == "intro":
 		intro_t += delta
 		# Fade the menu theme out over the fall, silent by the time the moon lands.
@@ -63,9 +62,6 @@ func _process(delta: float) -> void:
 		if intro_t >= INTRO_DUR:
 			get_tree().change_scene_to_file("res://Game.tscn")
 			return
-	else:
-		# Hero moon hovers upper-center with a gentle bob.
-		moon_pos = Vector2(vp.x * 0.5, vp.y * MENU_MOON_FRAC + sin(time * 1.3) * 10.0)
 	queue_redraw()
 
 
@@ -82,49 +78,43 @@ func _input(event: InputEvent) -> void:
 func _draw() -> void:
 	var vp := get_viewport_rect().size
 	if state == "intro":
-		_draw_intro(vp)
-		return
-	_draw_bg(vp, _menu_spacing(), moon_pos)
-	# The moon shines the grid patch under it, exactly like the in-game moon.
-	# DEFERRED (waiting on the other agent's final cell-lighting): also feed the mouse
-	# position here so the cursor lights the grid the same way. Hook:
-	#     _grid_shine(vp, _menu_spacing(), get_local_mouse_position(), style.moon_slow)
-	var mcol := style.moon_slow.lerp(style.moon_fast, 0.35 + 0.2 * sin(time * 4.0))
-	_glow_circle(moon_pos, MENU_MOON_R + 3.0 * sin(time * 1.3), mcol)
+		# Ease-out: the camera moves fast at the start and slows as it settles onto the game frame.
+		var raw := clampf(intro_t / INTRO_DUR, 0.0, 1.0)
+		var p := 1.0 - pow(1.0 - raw, 3.0)
+		_draw_scene(vp, p, lerpf(_menu_spacing(), style.grid_spacing, p), 0.0)
+	else:
+		_draw_scene(vp, 0.0, _menu_spacing(), sin(time * 1.3) * 8.0)
 
 
-# The "press PLAY" cinematic: the huge menu moon shrinks and the camera pulls back, revealing
-# it settling onto the top of ring 0 with the planet at center — i.e. the game's exact first
-# frame — then we cut to Game.tscn. A short crossfade at the end hides the cut.
-func _draw_intro(vp: Vector2) -> void:
-	var raw := clampf(intro_t / INTRO_DUR, 0.0, 1.0)
+# Everything is drawn through a virtual camera (focus + zoom) that interpolates from the menu
+# framing (p=0: zoomed in on the moon, which sits below the title; ring/core off-screen) to the
+# game's exact first frame (p=1: moon on the ring's top edge, planet centred). Because p=1 equals
+# Game.tscn's opening view, the cut at the end is seamless — the moon never jumps.
+func _draw_scene(vp: Vector2, p: float, grid_spacing: float, moon_bob: float) -> void:
 	var center := vp * 0.5
 	var z_end := minf(MAX_ZOOM, (minf(vp.x, vp.y) * 0.5 * VIEW_MARGIN) / BASE_RADIUS)
+	var z0 := MENU_MOON_R / MOON_RADIUS                                  # menu zoom sets the hero size
+	var f0y := WORLD_MOON_Y - (MENU_MOON_FRAC * vp.y - center.y) / z0     # focus puts the moon below the title
+	var focus := Vector2(0.0, lerpf(f0y, 0.0, p))
+	var zoom := lerpf(z0, z_end, p)
 
-	# The ring + core zoom in from small, their TOP edge rising to meet the falling moon. Everything
-	# settles to z_end = the game's exact first frame, so the cut into Game.tscn is seamless.
-	var cam_z := lerpf(z_end * 0.5, z_end, smoothstep(0.0, 1.0, raw))
-	var wa := clampf(raw / 0.35, 0.0, 1.0)             # fade the world in over the first part
+	var moon_screen := center + (Vector2(0.0, WORLD_MOON_Y) - focus) * zoom + Vector2(0.0, moon_bob)
+	var ring_center := center - focus * zoom
 
-	# Moon falls STRAIGHT DOWN (x dead-centre) from high above onto the ring's TOP — the spot the
-	# game's moon starts at: centre + (0, -base_radius) * z_end. No rise, no sideways drift.
-	var ring_top := center + Vector2(0.0, -BASE_RADIUS * z_end)
-	var start_pos := Vector2(center.x, vp.y * MENU_MOON_FRAC)
-	var mp := start_pos.lerp(ring_top, raw * raw)      # ease-in = gravity acceleration
-	var mr := lerpf(MENU_MOON_R, MOON_RADIUS * z_end, raw)
+	# Grid: screen-space, from 0 (same as the in-game grid); the moon lights the patch under it.
+	_draw_bg(vp, grid_spacing, moon_screen)
 
-	# Grid: game spacing/phase (from 0), so it lines up with the real grid at the hand-off.
-	_draw_bg(vp, lerpf(_menu_spacing(), style.grid_spacing, raw), mp)
+	# Ring + core fade in as the camera pulls back to reveal them (off-screen in the menu).
+	var wa := clampf(p / 0.3, 0.0, 1.0)
+	if wa > 0.0:
+		var rcol := style.ring_locked
+		rcol.a *= wa
+		draw_arc(ring_center, BASE_RADIUS * zoom, 0.0, TAU, 96, rcol, style.ring_w_locked)
+		var pcol := style.planet_sick
+		pcol.a *= wa
+		draw_circle(ring_center, PLANET_RADIUS * zoom, pcol)
 
-	# Core + ring (centred), zooming in + fading in beneath the falling moon.
-	var rcol := style.ring_locked
-	rcol.a *= wa
-	draw_arc(center, BASE_RADIUS * cam_z, 0.0, TAU, 96, rcol, style.ring_w_locked)
-	var pcol := style.planet_sick
-	pcol.a *= wa
-	draw_circle(center, PLANET_RADIUS * cam_z, pcol)
-
-	_glow_circle(mp, mr, style.moon_slow.lerp(style.moon_fast, 0.4))
+	_glow_circle(moon_screen, MOON_RADIUS * zoom, style.moon_slow.lerp(style.moon_fast, 0.4))
 
 
 func _menu_spacing() -> float:
@@ -257,7 +247,7 @@ func _build_ui() -> void:
 	title.add_theme_color_override("font_color", style.moon_slow)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	title.offset_top = 210.0
+	title.offset_top = 90.0
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_title = title
 	_ui.add_child(title)
