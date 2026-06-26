@@ -176,3 +176,61 @@ centered `PLAY`/`SETTINGS` (pleenko-style StyleBoxFlat hover/press), and a `SETT
   out. If nothing is buyable, `open()` refuses and flashes **"No upgrades available"**.
 - Top-left readout **"Stardust: x/y"** with a glowing purple dot (same `draw_point_glow`
   recipe as the rings). Renamed the in-HUD/modal **"STAR DUST"** label to **"STARDUST"**.
+
+### Wired the upgrade menu into the game (replaces the old in-code modal)
+
+- **Two wallets:** the top row (Core / Boost / Stardust) spends **Stardust** (`inventory`); the
+  bottom row (Attack / Comet) spends **Comets** (`asteroid_mats`). Header shows both readouts
+  (purple + cyan dots); a section's currency is just its row. Old branching tech-tree modal
+  (`econ_nodes`/`battle_nodes`/`draw_shop_modal`) is superseded — left in as dead code for now.
+- **Game.gd hooks:** `UpgradeMenu` is instanced on a `CanvasLayer` (layer 10) in `_ready`.
+  `open_upgrades()` configures it with both wallets + `unlocked` and opens it (sets `shop_open`
+  only if something's buyable, so the "No upgrades available" flash doesn't freeze play). The
+  `purchased` signal syncs the spent wallets back and calls `apply_upgrade(id)`; `closed` clears
+  `shop_open`. While open, Game swallows all gameplay keys/clicks (the menu owns input).
+- **Effect mapping** (one level per buy): core_max → `core_cap *= 2`; core_refill → stub
+  (`core_refill_level`); boost_strength → `boost_base *= 1+boost_up`; boost_frequency →
+  `light_delay -= 0.4` (floor 0.8); dust_capacity → `max_inventory += 3`; dust_spawn →
+  `material_max += 1`; horns → `hit_damage += 1` (new SPACE-damage stat, applied to asteroids +
+  enemies); ram → `has_ramming`; armor → `asteroid_hit_mult += 0.1` toward 1.0 (less slowdown);
+  more_asteroids → `asteroid_max += 1`. `hit_damage`/`asteroid_hit_mult` restored on `reset()`,
+  which also calls `upgrade_menu.reset_upgrades()` to clear bought levels.
+
+### Upgrade-menu tuning pass
+
+- **Combo softened:** light-boost multiplier is now `1 + combo·0.1` (combo 1 = 1.1×, 2 = 1.2×, …)
+  instead of `1 + (combo-1)·0.25`. `combo_step` export = 0.1.
+- **Buying no longer closes the shop** — only **B** / Esc do. After a buy the selection hops to
+  the next still-buyable card, or stays put if nothing's left.
+- **Progressive reveal (less overwhelming):** top row reveals one section per shop visit,
+  cumulatively — visit 1 = Stardust, visit 2 = +Core, visit 3 = +Light boost. Driven by
+  `shop_visits` (Game) → `reveal` (menu); counter only advances on a visit that actually opens.
+  Bottom row (Attack / Comet) is unchanged — still gated on the ring-3 unlock.
+- **Boost → "Light boost"** (id unchanged). **Section headers are white** (was currency-colored;
+  currency now shown only by the cost dots).
+- **Panel auto-sizes** to the visible sections and centers each row, so a single revealed
+  section doesn't float in a full-width box (narrow floor `MIN_W`; full `FRAME_W` once the comet
+  readout is present so the centered title clears the top-left readouts).
+
+### Upgrade costs reworked + Back button
+
+- **Per-level cost model:** each upgrade now carries `sd[]` (stardust) and `cm[]` (comets) cost
+  arrays (max_level = sd.size()), replacing the flat `cost × (level+1)`. The `purchased` signal
+  now passes the bought `level`, and `apply_upgrade(id, level)` branches on it. Costs mapped onto
+  the old tech-tree ladders:
+  - Stardust: *Increase max capacity* = old "More square capacity" `1/3/6/10` (carry 6/10/15/20);
+    *Increase spawn rate* = "More squares" `1/3/6` (+1 each) **and its 4th tier is Vacuum** (3 comets).
+  - Core: *Increase max* = "More core capacity" `2/4/8/16` (×2 each); *Increase refill rate* =
+    `3/7/12`, storing `core_refill_rate` 2.5→5→10→20/s (**mechanic not implemented — values stored
+    for later**).
+  - Light boost: *Increase strength* = "Boost light" `5/10/20`, each level +speed **and +1
+    core/light** (the old tradeoff); *Increase frequency* = "Faster lights" `6/12` (1.5s → 1.0s)
+    **with a 3rd tier of Double lights** (11 stardust + 1 comet → `light_count = 2`). Both 3 levels.
+  - Attack/Comet: all comets (`3/6/9`, Ram `4`).
+  - **Killed** the "Larger space hit" / reach upgrade (not offered).
+- **A couple of top-row (ring-2) levels cost comets** — Vacuum and the comet half of Double lights —
+  rendered with a cyan comet dot (Double lights shows both `11 ◆  1 ☄`). Everything else on the top
+  row is stardust; the whole bottom row is comets.
+- **Back button** at the bottom: labelled `[B]ack` (the bracket marks the hotkey), but it's also a
+  nav target — arrow down to it and press SPACE. Section headers stay white; footer simplified.
+- **Removed** the carried-stardust dots trailing the moon (didn't look good).

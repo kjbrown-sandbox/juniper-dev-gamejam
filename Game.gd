@@ -61,7 +61,7 @@ var arrow_tex: Texture2D
 @export var boost_up := 0.5             # Boost-power upgrade multiplies boost_base by (1 + this)
 @export var combo_every := 3            # (unused) every Nth consecutive hit gave a combo boost
 @export var combo_boost_mult := 1.5     # (unused) that hit's boost was multiplied by this
-@export var combo_step := 0.25          # each combo above 1 adds this fraction to a light's boost (combo 3 = 1.5x)
+@export var combo_step := 0.1           # each combo adds this fraction to a light's boost (combo 1 = 1.1x, 2 = 1.2x, …)
 @export var powerdown_time := 1.5       # a MISS powers the moon down for this long (Space locked)
 @export var powerdown_dark := 1.0       # ...fully unlit for this long, then emissions ramp back to full
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
@@ -172,6 +172,7 @@ var confirm_hit: Array = []  # clickable Yes/No regions in the confirm overlay
 var space_cd := 0.0
 var powerdown := 0.0     # seconds remaining in the post-MISS power-down (moon unlit, Space locked)
 var shop_open := false
+var shop_visits := 0       # times the upgrade screen has opened this run (drives section reveal)
 var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, action, list, idx }
 
 # Upgrades
@@ -182,7 +183,10 @@ var has_material_boost := false
 var has_ramming := false
 var has_vacuum := false
 var reach_level := 0      # "Larger space hit" upgrades; reach_mult() = 1 + level/6 (lvl3 = 1.5x)
+var hit_damage := 1       # SPACE damage per hit to asteroids/enemies; +1 per Horns level
+var core_refill_rate := 2.5   # Core "refill rate" upgrade target (2.5→5→10→20/s) — mechanic TBD
 var beam_on := false
+var upgrade_menu: Control    # the UpgradeMenu scene instance (built in _ready)
 var shop_sq: Array = []
 var shop_bt: Array = []
 
@@ -225,9 +229,20 @@ func _ready() -> void:
 		"light_delay": light_delay,
 		"ram_hit_mult": ram_hit_mult,
 		"asteroid_hits": asteroid_hits,
+		"asteroid_hit_mult": asteroid_hit_mult,
 		"asteroid_max": asteroid_max,
 		"threat_hp": threat_hp,
 	}
+	# Upgrade screen (its own scene). It lives on a CanvasLayer so it draws on top in screen
+	# space; we drive it via configure()/open() and react to its purchased/closed signals.
+	var ul := CanvasLayer.new()
+	ul.layer = 10
+	add_child(ul)
+	upgrade_menu = load("res://UpgradeMenu.tscn").instantiate()
+	upgrade_menu.auto_open_for_preview = false   # the game opens it, not the preview path
+	ul.add_child(upgrade_menu)
+	upgrade_menu.purchased.connect(_on_upgrade_purchased)
+	upgrade_menu.closed.connect(_on_upgrade_closed)
 	reset()
 
 
@@ -342,7 +357,10 @@ func reset() -> void:
 	confirm_reset = false
 	confirm_hit.clear()
 	shop_open = false
+	shop_visits = 0
 	shop_hit.clear()
+	if upgrade_menu:
+		upgrade_menu.reset_upgrades()   # clear bought levels + hide the menu
 	has_horns = false
 	has_horns2 = false
 	has_blasters = false
@@ -350,6 +368,8 @@ func reset() -> void:
 	has_ramming = false
 	has_vacuum = false
 	reach_level = 0
+	hit_damage = 1
+	core_refill_rate = 2.5
 	beam_on = false
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
@@ -363,6 +383,7 @@ func reset() -> void:
 	light_delay = _base.light_delay
 	ram_hit_mult = _base.ram_hit_mult
 	asteroid_hits = _base.asteroid_hits
+	asteroid_hit_mult = _base.asteroid_hit_mult
 	asteroid_max = _base.asteroid_max
 	threat_hp = _base.threat_hp
 	overflow_mult = 1   # pure runtime var, base is always 1
@@ -722,8 +743,8 @@ func _tick_play(sim: float) -> void:
 
 	# Back at the hub with no enemy on the inner ring -> open the upgrade screen.
 	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack():
-		shop_open = true
 		hub_pending = false
+		open_upgrades()
 
 	_trail()
 
@@ -821,17 +842,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				confirm_reset = false
 		return
 
-	# Upgrade modal: only buying + back + restart.
+	# Upgrade screen owns its own keys (nav / SPACE-buy / B-back, handled in UpgradeMenu._input);
+	# swallow everything else so gameplay keys don't fire behind it.
 	if shop_open:
-		match k:
-			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9:
-				var idx := k - KEY_1   # economy rows first, then battle (continuous numbering)
-				if idx < shop_sq.size():
-					buy(shop_sq[idx])
-				elif unlocked >= 3 and idx - shop_sq.size() < shop_bt.size():
-					buy(shop_bt[idx - shop_sq.size()])
-			KEY_B: shop_open = false
-			KEY_R: confirm_reset = true
 		return
 
 	match k:
@@ -906,14 +919,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 		return
 
-	# Upgrade modal: buy rows / back button.
+	# Upgrade screen is keyboard-driven (UpgradeMenu); swallow clicks while it's up.
 	if shop_open:
-		for h in shop_hit:
-			if (h.rect as Rect2).has_point(mp):
-				match h.action:
-					"back": shop_open = false
-					"buy": buy(shop_sq[h.idx] if h.list == "sq" else shop_bt[h.idx])
-				return
 		return
 
 	# Pause toggle via the corner icon (Pleenko-style clickable pause button).
@@ -1009,7 +1016,7 @@ func try_boost() -> bool:
 		if midair:
 			t.hp = 0
 		else:
-			t.hp -= 1
+			t.hp -= hit_damage   # Horns raises hit_damage (+1 per level)
 		t.cd = asteroid_hit_cd   # a successful hit suppresses the contact-slow this pass
 		hit_enemy = true
 		did = true
@@ -1030,7 +1037,7 @@ func try_boost() -> bool:
 			var in_shock_a: bool = shock and shock_c.distance_to(ap) < shock_r
 			if not (in_normal_a or in_shock_a):
 				continue
-			ast.hits_left -= 1
+			ast.hits_left -= hit_damage   # Horns raises hit_damage (+1 per level)
 			hit_ast = true
 			did = true
 			shake = minf(1.8, shake + 0.3)
@@ -1049,8 +1056,8 @@ func do_boost(li: int) -> void:
 	var la: float = lights[li]
 	var q := clampf(1.0 - (display_radius * absf(wrapf(angle - la, -PI, PI))) / gate_dist, 0.0, 1.0)
 	combo += 1
-	# Combo is a straight multiplier on the push: each step above 1 adds combo_step (combo 3 = 1.5x).
-	var gain := boost_base * (0.5 + 0.5 * q) * (1.0 + float(combo - 1) * combo_step)
+	# Combo is a straight multiplier on the push: each combo adds combo_step (combo 1 = 1.1x, 2 = 1.2x, …).
+	var gain := boost_base * (0.5 + 0.5 * q) * (1.0 + float(combo) * combo_step)
 	speed = minf(max_speed, speed + gain)
 	shake = minf(1.6, shake + 0.35 + 0.4 * q)
 	var lp := ring_point(display_radius, la)
@@ -1069,6 +1076,63 @@ func do_boost(li: int) -> void:
 func arrive_at_hub() -> void:
 	# Carried squares ARE the wallet now (no banking) — just flag the shop to open.
 	hub_pending = unlocked >= 2   # shop opens once the inner ring is clear of enemies
+
+
+# ── Upgrade screen (UpgradeMenu scene) ─────────────────────
+# Hand the menu the current wallets (stardust = carried squares, comets = asteroid mats) and
+# open it. If nothing's affordable it flashes "No upgrades available" instead and we stay in
+# play (shop_open stays false, so the game isn't frozen).
+func open_upgrades() -> void:
+	# Reveal the top-row sections one per visit: 1st = Stardust, 2nd = +Core, 3rd = +Light boost.
+	# The counter only advances on a visit that actually opens (something was buyable), so a
+	# "no upgrades" bounce doesn't burn a reveal step.
+	var reveal := mini(shop_visits + 1, 3)
+	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, reveal)
+	if upgrade_menu.any_buyable():
+		shop_visits += 1
+		shop_open = true
+	upgrade_menu.open()
+
+
+# A purchase happened: pull the spent wallets back from the menu, then apply the effect.
+func _on_upgrade_purchased(section_id: String, upgrade_id: String, level: int) -> void:
+	inventory = upgrade_menu.stardust
+	asteroid_mats = upgrade_menu.comets
+	apply_upgrade(upgrade_id, level)
+
+
+func _on_upgrade_closed() -> void:
+	shop_open = false
+
+
+# Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. The new
+# upgrades reuse the old tech-tree ladders; a couple have a special 4th tier (Vacuum, Double
+# lights). `core_refill_rate` is stored for a refill mechanic that isn't wired up yet.
+func apply_upgrade(id: String, level: int) -> void:
+	match id:
+		"core_max":
+			core_cap *= 2.0                                    # ×2 per level (2/4/8/16 stardust)
+		"core_refill":
+			core_refill_rate = [2.5, 5.0, 10.0, 20.0][level]   # level 1→5, 2→10, 3→20 (mechanic TBD)
+		"boost_strength":
+			boost_base *= (1.0 + boost_up)                     # old "Boost light": +speed...
+			light_cost += 1.0                                  # ...but +1 core per light (the tradeoff)
+		"boost_frequency":
+			if level <= 2:
+				light_delay = [light_delay, 1.5, 1.0][level]   # old "Faster lights": 1.5s then 1.0s
+			else:
+				light_count = 2                                # 3rd tier = "Double lights"
+		"dust_capacity":
+			max_inventory += [0, 3, 4, 5, 5][level]            # carry 6 / 10 / 15 / 20
+		"dust_spawn":
+			if level <= 3:
+				material_max += 1                              # +1 stardust on the ring
+			else:
+				has_vacuum = true                              # 4th tier = "Vacuum"
+		"horns":           has_horns = true; hit_damage += 1
+		"ram":             has_ramming = true
+		"armor":           asteroid_hit_mult = minf(1.0, asteroid_hit_mult + 0.1)   # less slowdown
+		"more_asteroids":  asteroid_max += 1
 
 
 func buy(node: Dictionary) -> void:
@@ -1243,14 +1307,6 @@ func _draw() -> void:
 		var wpos := fst.lerp(Vector2.ZERO, fft)
 		var fr := 6.0 * z * (1.0 - 0.4 * fft)
 		draw_point_glow(c + wpos * z, fr, style.square_ready)
-
-	# Carried star dust trailing the moon.
-	var carried := mini(inventory, 8)
-	for j in carried:
-		var idx := trail.size() - 2 - j * 3
-		if idx >= 0:
-			var tpos: Vector2 = trail[idx]
-			draw_point_glow(c + tpos * z, 5.0 * z, style.square_ready)
 
 	# Moon (the comet head) — the same glowing point as the boost lights, but kept cyan.
 	# After a MISS it powers down: emissions cut for powerdown_dark, then ramp back to full.
@@ -1563,8 +1619,7 @@ func _draw_hud(font: Font) -> void:
 		hx += isz
 		draw_string(font, Vector2(hx, hbase), p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
 
-	if shop_open:
-		draw_shop_modal(font)
+	# (The upgrade screen draws itself — it's the UpgradeMenu scene on its own CanvasLayer.)
 	if confirm_reset:
 		draw_confirm_modal(font)
 
