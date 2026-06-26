@@ -45,8 +45,12 @@ var arrow_tex: Texture2D
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
 @export var light_cost := 1.0
-@export var dying_batches := 2          # final N light-batches (orange + slow) as the core dies
-@export var dying_delay_mult := 3.0     # those final lights respawn this many × slower
+@export var light_charge_time := 0.2    # core shakes/charges this long before a light ejects
+@export var light_fly_time := 0.75      # core → ring flight time once it ejects
+@export var light_fly_pow := 7.0        # ease-in exponent: slow start → fast → abrupt stop (higher = snappier)
+@export var refill_suck_time := 0.4     # how long a moon-mote takes to fall into the recharging core
+@export var refill_emit_step := 0.12    # seconds between moon-mote emissions while recharging
+@export var dying_batches := 2          # final N light-batches (orange) as the core dies
 @export var light_min_speed := 100.0              # at/below this speed the arc uses its "slow" range
 @export var light_tween_speed := 2000.0           # speed at which the arc range reaches its "fast" values
 @export var light_arc_slow := Vector2(15.0, 40.0)   # min/max degrees ahead at light_min_speed
@@ -62,8 +66,8 @@ var arrow_tex: Texture2D
 @export var combo_every := 3            # (unused) every Nth consecutive hit gave a combo boost
 @export var combo_boost_mult := 1.5     # (unused) that hit's boost was multiplied by this
 @export var combo_step := 0.1           # each combo adds this fraction to a light's boost (combo 1 = 1.1x, 2 = 1.2x, …)
-@export var powerdown_time := 1.5       # a MISS powers the moon down for this long (Space locked)
-@export var powerdown_dark := 1.0       # ...fully unlit for this long, then emissions ramp back to full
+@export var powerdown_time := 1.0       # a MISS powers the moon down for this long (Space locked)
+@export var powerdown_dark := 0.75      # ...fully unlit for this long, then emissions ramp back to full
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
 @export var base_decay := 15.0
 @export var whiff_slow := 0.85
@@ -154,6 +158,8 @@ var overflow_mult := 1    # credits per overflow square (+1 per Bigger-squares l
 var lights: Array = []
 var light_count := 1
 var light_timer := 0.0
+var spawning: Array = []   # lights in flight from the core → ring: { angle, t, charge }
+var core_charge := 0.0     # 0..1: drives the core's pre-spawn jitter + brief payment dip
 
 var materials: Array = []   # { angle:float, ready:float } squares on the middle ring
 var flying: Array = []      # { start:Vector2, t:float }
@@ -184,7 +190,8 @@ var has_ramming := false
 var has_vacuum := false
 var reach_level := 0      # "Larger space hit" upgrades; reach_mult() = 1 + level/6 (lvl3 = 1.5x)
 var hit_damage := 1       # SPACE damage per hit to asteroids/enemies; +1 per Horns level
-var core_refill_rate := 2.5   # Core "refill rate" upgrade target (2.5→5→10→20/s) — mechanic TBD
+var core_refill_rate := 1.5   # core HP/s restored while orbiting home; upgrade ladder 1.5→5→10→20
+var refill_emit := 0.0        # cadence timer for the moon-mote suck-in fluff while recharging
 var beam_on := false
 var upgrade_menu: Control    # the UpgradeMenu scene instance (built in _ready)
 var shop_sq: Array = []
@@ -341,6 +348,9 @@ func reset() -> void:
 	lights.clear()
 	light_count = 1
 	light_timer = 0.0
+	spawning.clear()
+	core_charge = 0.0
+	refill_emit = 0.0
 	lights = [top_angle]   # a boost waits right under the player to launch with
 	materials.clear()
 	flying.clear()
@@ -369,7 +379,7 @@ func reset() -> void:
 	has_vacuum = false
 	reach_level = 0
 	hit_damage = 1
-	core_refill_rate = 2.5
+	core_refill_rate = 1.5
 	beam_on = false
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
@@ -508,7 +518,11 @@ func rand_ahead() -> float:
 	var t := clampf((speed - light_min_speed) / maxf(1.0, light_tween_speed - light_min_speed), 0.0, 1.0)
 	var lo := lerpf(light_arc_slow.x, light_arc_fast.x, t)
 	var hi := lerpf(light_arc_slow.y, light_arc_fast.y, t)
-	return wrapf(angle + deg_to_rad(randf_range(lo, hi)), -PI, PI)
+	# The spawn animation isn't instant — the player keeps orbiting during the charge + flight,
+	# so lead the target by how far they'll travel (angular speed = speed / radius), or the light
+	# lands behind them. The arc-ahead is then measured from where they'll actually be at landing.
+	var lead := (speed / maxf(1.0, display_radius)) * (light_charge_time + light_fly_time)
+	return wrapf(angle + lead + deg_to_rad(randf_range(lo, hi)), -PI, PI)
 
 
 # ── Spawners ───────────────────────────────────────────────
@@ -656,7 +670,7 @@ func _tick_play(sim: float) -> void:
 	angle = wrapf(angle + dlt, -PI, PI)
 	cum_angle += dlt
 	var nsub := clampi(int(dlt / comet_emit_step), 1, 60)
-	if powerdown <= 0.0:   # powered down by a MISS: stop trailing until the moon comes back (1.5s)
+	if powerdown <= 0.0:   # powered down by a MISS: stop trailing until the moon comes back (1s)
 		for s in range(1, nsub + 1):
 			var f := float(s) / float(nsub)
 			var aa := a0 + dlt * f
@@ -698,15 +712,38 @@ func _tick_play(sim: float) -> void:
 
 
 	# Lights spawn as a full batch once the previous batch is fully used; each costs 1 core.
-	if lights.is_empty():
+	# A light doesn't appear on the ring directly — it charges inside the core (shake), then a
+	# mote ejects from the core surface and flies out to its gate spot (see the `spawning` tick).
+	if lights.is_empty() and spawning.is_empty():
 		light_timer -= sim
 		if light_timer <= 0.0:
 			for n in light_count:
 				if unlocked < 2:
-					lights.append(rand_ahead())           # free before the core exists (ring 1)
+					spawning.append({ "angle": rand_ahead(), "t": 0.0, "charge": light_charge_time })   # free before the core exists (ring 1)
 				elif core > light_cost:                   # strict: never spend the last point
 					core -= light_cost
-					lights.append(rand_ahead())
+					spawning.append({ "angle": rand_ahead(), "t": 0.0, "charge": light_charge_time })
+					core_charge = 1.0                     # kick the core's drain wobble/dip on payment
+
+	# Advance lights in flight from the core: pre-spawn charge (shake) first, then ease out.
+	core_charge = maxf(0.0, core_charge - sim / maxf(0.01, light_charge_time))
+	for sp in spawning:
+		if sp.charge > 0.0:
+			sp.charge -= sim
+		else:
+			sp.t += sim / maxf(0.01, light_fly_time)
+	for i in range(spawning.size() - 1, -1, -1):
+		var fs: Dictionary = spawning[i]
+		if fs.charge <= 0.0 and fs.t >= 1.0:
+			lights.append(fs.angle)               # now it's a real, grabbable light on the ring
+			spawning.remove_at(i)
+			flashes.append({ "pos": ring_point(display_radius, fs.angle), "life": 0.3, "r": 40.0 })   # latch pop
+			shake = minf(1.6, shake + 0.25)       # snap on the abrupt stop
+
+	# Moon-motes falling into the core while it recharges (visual only — fill is the steady rate).
+	for f in flying:
+		f.t += sim / maxf(0.01, refill_suck_time)
+	flying = flying.filter(func(f): return f.t < 1.0)
 
 	# Asteroids (loot vein, ring 3) — respawn only after a delay once destroyed.
 	if unlocked >= 3:
@@ -731,18 +768,26 @@ func _tick_play(sim: float) -> void:
 	# Enemies run on the clock from launch (we're past the not-started early-return).
 	_tick_threats(sim)
 
-	# Core refills to full ONLY on the inner ring (home base) — unless an enemy has reached it.
-	# (Other sealed rings still get reduced decay via cur_decay, but no replenish.)
-	if current_ring == 0 and not moving and not core_under_attack():
-		core = core_cap
+	# Core recharges over time ONLY on the inner ring (home base) — and only once the ring is clear
+	# of enemies. (Other sealed rings still get reduced decay via cur_decay, but no replenish.)
+	# While below full, moon-motes get sucked into the core as pure visual fluff — fill is the rate.
+	if current_ring == 0 and not moving and threats.is_empty():
+		core = minf(core_cap, core + core_refill_rate * sim)
+		if core < core_cap:
+			refill_emit -= sim
+			if refill_emit <= 0.0:
+				refill_emit = refill_emit_step
+				var ea := angle + randf_range(-0.6, 0.6)                                   # spawn near the moon's orbit position
+				var er := randf_range(planet_draw_radius() + 20.0, display_radius)         # somewhere between the core and the ring
+				flying.append({ "start": ring_point(er, ea), "t": 0.0 })
 	# Death only when the planet's core is drained to nothing.
 	if core <= 0.0:
 		phase = "dead"
 		if dead_reason == "":
 			dead_reason = "THE PLANET'S CORE DIED"
 
-	# Back at the hub with no enemy on the inner ring -> open the upgrade screen.
-	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack():
+	# Back at the hub, enemies cleared and the core topped back off -> open the upgrade screen.
+	if hub_pending and not shop_open and current_ring == 0 and not moving and threats.is_empty() and core >= core_cap:
 		hub_pending = false
 		open_upgrades()
 
@@ -1068,9 +1113,8 @@ func do_boost(li: int) -> void:
 	if q > 0.75:
 		hitstop = hitstop_time
 	lights.remove_at(li)
-	if lights.is_empty():   # whole batch used — respawn after the delay
-		var mult := dying_delay_mult if light_dying() else 1.0
-		light_timer = light_delay * mult + randf_range(-light_delay_jitter, light_delay_jitter)
+	if lights.is_empty() and spawning.is_empty():   # whole batch used — respawn after the delay
+		light_timer = light_delay + randf_range(-light_delay_jitter, light_delay_jitter)
 
 
 func arrive_at_hub() -> void:
@@ -1107,13 +1151,13 @@ func _on_upgrade_closed() -> void:
 
 # Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. The new
 # upgrades reuse the old tech-tree ladders; a couple have a special 4th tier (Vacuum, Double
-# lights). `core_refill_rate` is stored for a refill mechanic that isn't wired up yet.
+# lights). `core_refill_rate` sets the core's home-ring recharge speed (HP/s).
 func apply_upgrade(id: String, level: int) -> void:
 	match id:
 		"core_max":
 			core_cap *= 2.0                                    # ×2 per level (2/4/8/16 stardust)
 		"core_refill":
-			core_refill_rate = [2.5, 5.0, 10.0, 20.0][level]   # level 1→5, 2→10, 3→20 (mechanic TBD)
+			core_refill_rate = [1.5, 5.0, 10.0, 20.0][level]   # core HP/s while orbiting home: base 1.5, 1→5, 2→10, 3→20
 		"boost_strength":
 			boost_base *= (1.0 + boost_up)                     # old "Boost light": +speed...
 			light_cost += 1.0                                  # ...but +1 core per light (the tradeoff)
@@ -1211,25 +1255,35 @@ func _draw() -> void:
 	# (low) up to the light's yellow (full), so it brightens/darkens with health. At launch it
 	# flares from dead → full (core_lit) so the menu's dead core comes alive instead of popping.
 	var pr := planet_draw_radius() * z
-	var energy := clampf(core / maxf(1.0, core_cap), 0.0, 1.0) * core_lit   # full health = bright yellow + emission
+	# While charging a light, the core wobbles + dips a touch so the eye links drain → birth.
+	var core_c := c + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * core_charge * 4.0 * z
+	var energy := clampf(core / maxf(1.0, core_cap), 0.0, 1.0) * core_lit * (1.0 - 0.25 * core_charge)   # full health = bright yellow + emission
 	for gi in range(5, 0, -1):
 		var lt := float(gi) / 5.0
 		var gc := style.light_idle
 		gc.a = energy * 0.55 * (1.0 - lt) * (1.0 - lt)   # strong emission only when energized
-		draw_circle(c, pr * (1.0 + 1.4 * lt), gc)
-	draw_circle(c, pr, style.planet_sick.lerp(style.light_idle, energy))   # dead = dark purple (matches the menu)
-	var ht_size := int(round(26.0 * ui_text_scale))
-	var ht_voff := (font.get_ascent(ht_size) - font.get_descent(ht_size)) * 0.5   # baseline → vertical center
-	var ht_pos := c + Vector2(-100.0, ht_voff)
-	var ht_str := "%d/%d" % [clampi(ceili(core), 0, int(core_cap)), int(core_cap)]
-	# Dark outline so the readout stays legible on the vibrant yellow core (and the dark dead core).
-	draw_string_outline(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, maxi(2, int(ht_size * 0.1)), Color(0.1, 0.07, 0.02, 0.9))
-	draw_string(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, style.core_text)
+		draw_circle(core_c, pr * (1.0 + 1.4 * lt), gc)
+	draw_circle(core_c, pr, style.planet_sick.lerp(style.light_idle, energy))   # dead = dark purple (matches the menu)
+	# Core readout only matters once ring 2 is unlocked — before that you can't lose core, so hide it.
+	if unlocked >= 2:
+		var ht_size := int(round(26.0 * ui_text_scale))
+		var ht_voff := (font.get_ascent(ht_size) - font.get_descent(ht_size)) * 0.5   # baseline → vertical center
+		var ht_pos := c + Vector2(-100.0, ht_voff)
+		var ht_str := "%d/%d" % [clampi(ceili(core), 0, int(core_cap)), int(core_cap)]
+		# Dark outline so the readout stays legible on the vibrant yellow core (and the dark dead core).
+		draw_string_outline(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, maxi(2, int(ht_size * 0.1)), Color(0.1, 0.07, 0.02, 0.9))
+		draw_string(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, style.core_text)
 
-	# Shop is blocked by living enemies: prompt above the planet while waiting at the hub.
-	if hub_pending and not shop_open and current_ring == 0 and not threats.is_empty():
-		dtext(font, c + Vector2(-450, -planet_draw_radius() * z - 40.0), "KILL ENEMIES TO OPEN THE SHOP",
-			HORIZONTAL_ALIGNMENT_CENTER, 900, 26, style.shop_blocked)
+	# Shop is gated while waiting at the hub: clear enemies first, then let the core top off.
+	if hub_pending and not shop_open and current_ring == 0:
+		var gate_msg := ""
+		if not threats.is_empty():
+			gate_msg = "KILL ENEMIES TO OPEN THE SHOP"
+		elif core < core_cap:
+			gate_msg = "REFILL CORE TO OPEN SHOP"
+		if gate_msg != "":
+			dtext(font, c + Vector2(-450, -planet_draw_radius() * z - 40.0), gate_msg,
+				HORIZONTAL_ALIGNMENT_CENTER, 900, 26, style.shop_blocked)
 
 	# Blaster beam.
 	if beam_on:
@@ -1281,6 +1335,20 @@ func _draw() -> void:
 		var thp: int = tr.hp
 		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.threat_text)
 
+	# Lights in flight: a mote peels off the core surface and eases out to its gate spot,
+	# trailing a fading tendril back to the core (slow start → fast → abrupt stop at the ring).
+	for sp in spawning:
+		if sp.charge > 0.0:
+			continue   # still charging inside the core — invisible until it ejects
+		var eased: float = pow(sp.t, light_fly_pow)
+		var fly_rad := lerpf(planet_draw_radius(), display_radius, eased)
+		var edge := c + ring_point(planet_draw_radius(), sp.angle) * z   # where it peels off the core
+		var tip := c + ring_point(fly_rad, sp.angle) * z
+		var tcol := style.light_idle
+		tcol.a *= 0.35 * (1.0 - eased)                                   # tendril fades as it nears the ring
+		draw_glow_line(edge, tip, tcol, 3.0 * z)
+		draw_point_glow(tip, (4.0 + 6.0 * eased) * z, style.light_idle)  # grows as it launches
+
 	# Lights — a bright yellow point on the ring at the gate. A touch bigger than star dust
 	# so it's easy to spot and hit. Brightens + grows a little when you're in it.
 	for i in lights.size():
@@ -1300,13 +1368,13 @@ func _draw() -> void:
 		flcol.a *= fa
 		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, flcol, 3.0)
 
-	# Flying star dust (feed animation).
+	# Refill motes — glowing moon dust sucked into the core while it recharges; brightens as it nears.
 	for f in flying:
 		var fst: Vector2 = f.start
 		var fft: float = f.t
 		var wpos := fst.lerp(Vector2.ZERO, fft)
 		var fr := 6.0 * z * (1.0 - 0.4 * fft)
-		draw_point_glow(c + wpos * z, fr, style.square_ready)
+		draw_point_glow(c + wpos * z, fr, style.moon_slow.lerp(style.moon_fast, fft))
 
 	# Moon (the comet head) — the same glowing point as the boost lights, but kept cyan.
 	# After a MISS it powers down: emissions cut for powerdown_dark, then ramp back to full.

@@ -86,24 +86,24 @@ func default_sections() -> Array:
 			{ "id": "dust_capacity", "name": "Increase max capacity", "desc": "Carry more Stardust at once",
 			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 0] },
 			{ "id": "dust_spawn", "name": "Increase spawn rate", "desc": "Stardust spawns more often  ·  4th: Vacuum",
-			  "sd": [1, 3, 6, 0], "cm": [0, 0, 0, 3] },
+			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 2], "last_name": "Vacuum", "last_desc": "Auto-collect ready Stardust in reach" },
 		] },
 		{ "id": "core", "title": "Core", "row": 0, "upgrades": [
 			{ "id": "core_max", "name": "Increase max", "desc": "Raise the core's maximum capacity",
 			  "sd": [2, 4, 8, 16], "cm": [0, 0, 0, 0] },
-			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster  (2.5 → 20/s)",
+			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster  (1.5 → 20/s)",
 			  "sd": [3, 7, 12], "cm": [0, 0, 0] },
 		] },
 		{ "id": "boost", "title": "Light boost", "row": 0, "upgrades": [
-			{ "id": "boost_strength", "name": "Increase strength", "desc": "More speed per boost  ·  +1 core/light",
+			{ "id": "boost_strength", "name": "Increase speed", "desc": "More speed per boost  ·  +1 core/light",
 			  "sd": [5, 10, 20], "cm": [0, 0, 0] },
 			{ "id": "boost_frequency", "name": "Increase frequency", "desc": "More frequent lights  ·  3rd: Double lights",
-			  "sd": [6, 12, 11], "cm": [0, 0, 1] },
+			  "sd": [6, 12, 11], "cm": [0, 0, 1], "last_name": "Double lights", "last_desc": "Two boost lights at once" },
 		] },
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
 			{ "id": "horns", "name": "Horns", "desc": "+1 damage to asteroids and enemies",
-			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
-			{ "id": "ram", "name": "Ram", "desc": "Deal damage even on a whiffed hit",
+			  "sd": [0, 0], "cm": [3, 6] },
+			{ "id": "ram", "name": "Ram", "desc": "Deal damage even on miss",
 			  "sd": [0], "cm": [4] },
 		] },
 		{ "id": "comet", "title": "Comet", "row": 1, "upgrades": [
@@ -243,14 +243,17 @@ func _section_boxes() -> Array:
 	for si in sections.size():
 		if _section_visible(si):
 			rows[int(sections[si].row)].append(si)
+	# Shared left edge for every row: align them under the widest row (which stays centered in the
+	# panel), so a shorter bottom row starts flush-left with the top row instead of being centered.
+	var cols_max := maxi(rows[0].size(), rows[1].size())
+	var rw_max := cols_max * SECT_W + maxi(0, cols_max - 1) * COL_GAP
+	var x0 := o.x + (fw - rw_max) * 0.5
 	var out: Array = []
 	for row in 2:
 		var ids: Array = rows[row]
 		var n := ids.size()
 		if n == 0:
 			continue
-		var rw := n * SECT_W + (n - 1) * COL_GAP
-		var x0 := o.x + (fw - rw) * 0.5            # center this row
 		var sy := o.y + TOP_BAND + row * (SECT_H + ROW_GAP)
 		for j in n:
 			out.append({ "si": ids[j], "rect": Rect2(x0 + j * (SECT_W + COL_GAP), sy, SECT_W, SECT_H) })
@@ -438,7 +441,11 @@ func _draw_card(i: int) -> void:
 		_panel(r, 12.0, bg, Color(0, 0, 0, 0), 0.0)
 
 	var name_col := C_TEXT if (afford or sel or maxed) else C_DIMTEXT
-	_text(r.position + Vector2(18, 36), u.name, 25, name_col, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_bold)
+	# On the final tier (next/last buy), some upgrades rename to the special unlock they grant.
+	var nm: String = u.name
+	if u.has("last_name") and int(u.level) >= u.sd.size() - 1:
+		nm = u.last_name
+	_text(r.position + Vector2(18, 36), nm, 25, name_col, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_bold)
 
 	# Level pips under the name (tinted to the section's currency).
 	_draw_pips(r.position + Vector2(20, 52), int(u.level), u.sd.size(), section_tint(card.si))
@@ -450,8 +457,11 @@ func _draw_card(i: int) -> void:
 		var c := cost_of(u)
 		_draw_cost(r, c[0], c[1], afford)
 
-	# Description along the bottom.
-	_text(r.position + Vector2(18, r.size.y - 16), u.desc, 17, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
+	# Description along the bottom (the final tier swaps to its unlock's blurb, alongside last_name).
+	var dsc: String = u.desc
+	if u.has("last_desc") and int(u.level) >= u.sd.size() - 1:
+		dsc = u.last_desc
+	_text(r.position + Vector2(18, r.size.y - 16), dsc, 17, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
 
 
 # The Back button (a navigable target). "[B]ack" — the bracketed B marks the hotkey.
@@ -486,10 +496,9 @@ func _draw_cost(r: Rect2, sd: int, cm: int, afford: bool) -> void:
 		segs.append([cm, C_COMET])
 	for s in range(segs.size() - 1, -1, -1):   # draw right-to-left so comet ends up rightmost
 		var n: int = segs[s][0]
-		var col: Color = segs[s][1] if afford else C_WARN
-		var dcol := col
-		dcol.a = 1.0 if afford else 0.5
-		_point_glow(Vector2(right - 6.0, y_dot), 6.0, dcol)
+		var col: Color = segs[s][1]             # always the currency color (purple = stardust, cyan = comet)
+		col.a = 1.0 if afford else 0.5          # dim a touch when you can't afford it, but keep the hue
+		_point_glow(Vector2(right - 6.0, y_dot), 6.0, col)
 		var ns := str(n)
 		var nw := _font_bold.get_string_size(ns, HORIZONTAL_ALIGNMENT_LEFT, -1, 24).x
 		_text(Vector2(right - 18.0 - nw, y_txt), ns, 24, col, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_bold)

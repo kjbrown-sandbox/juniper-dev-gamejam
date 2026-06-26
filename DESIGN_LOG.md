@@ -234,3 +234,44 @@ centered `PLAY`/`SETTINGS` (pleenko-style StyleBoxFlat hover/press), and a `SETT
 - **Back button** at the bottom: labelled `[B]ack` (the bracket marks the hotkey), but it's also a
   nav target — arrow down to it and press SPACE. Section headers stay white; footer simplified.
 - **Removed** the carried-stardust dots trailing the moon (didn't look good).
+
+---
+
+## 2026-06-25 — Core drain↔refill made legible (lights spawn from the core; gradual recharge)
+
+The core's role (fuels lights, refills at home) was invisible at both ends. Made it readable:
+
+- **Drain — lights now spawn FROM the core.** A light no longer teleports onto the ring. On
+  payment the core wobbles + dips briefly (`core_charge`, `light_charge_time` 0.2s), then a mote
+  ejects from the core surface and eases out to its gate spot with an ease-in curve
+  (`pow(t, light_fly_pow=4)` — slow start → fast → abrupt stop), over `light_fly_time` 0.75s,
+  trailing a fading tendril, snapping with a flash + shake. New `spawning[]` array of
+  `{angle,t,charge}`; respawn timer waits on `spawning.is_empty()` too. In-flight motes aren't in
+  `lights`, so they're not grabbable until they latch. Tunables are exports.
+- **Refill — gradual, not instant.** Replaced the `core = core_cap` snap with
+  `core += core_refill_rate * sim` (base **1.5 HP/s**) while orbiting the inner ring. The wired-up
+  `core_refill` upgrade is now live: ladder rescaled `2.5/5/10/20` → **`1.5/3/6/12`**. While
+  recharging, glowing **moon-motes** get sucked into the core (repurposed the dead `flying[]`
+  array — recolored cyan `moon_slow→moon_fast`); purely visual, the fill is the flat rate.
+- **Dying lights — dropped the slowdown.** Final batches no longer respawn `dying_delay_mult`×
+  slower (removed that export); they fire at the normal cadence and just stop once the core can't
+  afford one (the strict `core > light_cost` gate already did this). **Kept** the orange warning
+  color via `light_dying()`.
+- All in `Game.gd`. Parse-checked clean; needs an editor/browser pass to tune feel.
+
+### Refinements + tuning (same session)
+
+- **Spawn lead-compensation:** `rand_ahead()` now leads the target by `(speed/radius) ×
+  (charge+fly)` so the light lands *ahead* of where the player will be, not behind them.
+- **Snappier shoot:** `light_fly_pow` 4 → **7** (steeper ease-in; barely moves, then snaps).
+- **Refill gating:** recharge now needs the inner ring **clear of enemies** (`threats.is_empty()`,
+  replacing the latched-only check). Ladder retuned to **base 1.5 / 5 / 10 / 20** HP/s.
+- **Shop gating:** the upgrade screen stays closed until enemies are cleared **and the core is
+  full**. New hub prompt: `KILL ENEMIES…` then `REFILL CORE TO OPEN SHOP`.
+- **Core readout** (`5/5`) hidden until ring 2 is unlocked (no core to lose before then).
+- **Miss powerdown softened:** `powerdown_time` 1.5 → **1.0s**, `powerdown_dark` 1.0 → **0.75s**.
+- **Upgrade menu (UpgradeMenu.gd):** bottom row left-aligned under the top row; costs always render
+  in their currency color (purple/cyan, dimmed when unaffordable) instead of orange; Horns cut to 2
+  levels (the +3 tier did nothing); "Increase strength" → **"Increase speed"**; "Increase spawn
+  rate" 4th tier costs 10 stardust + 2 comet; final tiers rename+re-blurb to **Vacuum** /
+  **Double lights** via `last_name`/`last_desc`.
