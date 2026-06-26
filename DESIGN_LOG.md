@@ -275,3 +275,7 @@ The core's role (fuels lights, refills at home) was invisible at both ends. Made
   levels (the +3 tier did nothing); "Increase strength" → **"Increase speed"**; "Increase spawn
   rate" 4th tier costs 10 stardust + 2 comet; final tiers rename+re-blurb to **Vacuum** /
   **Double lights** via `last_name`/`last_desc`.
+
+- **Refill gate relaxed:** recharge only pauses when an enemy is actually ON the inner ring
+  (`not core_under_attack()`); a still-traveling enemy no longer blocks it. (Shop still needs the
+  board fully clear.)

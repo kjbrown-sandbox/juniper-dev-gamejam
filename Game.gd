@@ -768,10 +768,11 @@ func _tick_play(sim: float) -> void:
 	# Enemies run on the clock from launch (we're past the not-started early-return).
 	_tick_threats(sim)
 
-	# Core recharges over time ONLY on the inner ring (home base) — and only once the ring is clear
-	# of enemies. (Other sealed rings still get reduced decay via cur_decay, but no replenish.)
-	# While below full, moon-motes get sucked into the core as pure visual fluff — fill is the rate.
-	if current_ring == 0 and not moving and threats.is_empty():
+	# Core recharges over time ONLY on the inner ring (home base) — paused only if an enemy has
+	# actually reached the inner ring (a still-traveling enemy is fine). (Other sealed rings get
+	# reduced decay via cur_decay, but no replenish.) While below full, moon-motes get sucked into
+	# the core as pure visual fluff — fill is the rate.
+	if current_ring == 0 and not moving and not core_under_attack():
 		core = minf(core_cap, core + core_refill_rate * sim)
 		if core < core_cap:
 			refill_emit -= sim
