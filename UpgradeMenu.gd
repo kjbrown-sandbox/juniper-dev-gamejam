@@ -459,7 +459,7 @@ func _draw_card(i: int) -> void:
 	if u.has("last_desc") and int(u.level) >= u.sd.size() - 1:
 		dsc = u.last_desc
 	# A capstone level (last_name swap) grants a different unlock, so its track's warn no longer applies.
-	var on_capstone := u.has("last_name") and int(u.level) >= u.sd.size() - 1
+	var on_capstone: bool = u.has("last_name") and int(u.level) >= u.sd.size() - 1
 	var warn: String = "" if on_capstone else u.get("warn", "")
 	if warn != "":
 		_text(r.position + Vector2(18, r.size.y - 44), dsc, 25, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
