@@ -85,29 +85,29 @@ func default_sections() -> Array:
 		{ "id": "stardust", "title": "Stardust", "row": 0, "upgrades": [
 			{ "id": "dust_capacity", "name": "Increase max capacity", "desc": "Carry more Stardust at once",
 			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 0] },
-			{ "id": "dust_spawn", "name": "Increase spawn rate", "desc": "Stardust spawns more often  ·  4th: Vacuum",
-			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 2], "last_name": "Vacuum", "last_desc": "Auto-collect ready Stardust in reach" },
+			{ "id": "dust_spawn", "name": "Increase spawn rate", "desc": "Stardust spawns more often",
+			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 2], "last_name": "Vacuum", "last_desc": "Auto-collect Stardust in reach" },
 		] },
 		{ "id": "core", "title": "Core", "row": 0, "upgrades": [
-			{ "id": "core_max", "name": "Increase max", "desc": "Raise the core's maximum capacity",
+			{ "id": "core_max", "name": "Increase max", "desc": "Raise the core's max capacity",
 			  "sd": [2, 4, 8, 16], "cm": [0, 0, 0, 0] },
-			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster  (1.5 → 20/s)",
+			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster",
 			  "sd": [3, 7, 12], "cm": [0, 0, 0] },
 		] },
 		{ "id": "boost", "title": "Light boost", "row": 0, "upgrades": [
-			{ "id": "boost_strength", "name": "Increase speed", "desc": "More speed per boost  ·  +1 core/light",
-			  "sd": [5, 10, 20], "cm": [0, 0, 0] },
-			{ "id": "boost_frequency", "name": "Increase frequency", "desc": "More frequent lights  ·  3rd: Double lights",
+			{ "id": "boost_strength", "name": "Increase speed", "desc": "More speed per boost",
+			  "warn": "Costs +1 core to spawn light boosts", "sd": [5, 10, 20], "cm": [0, 0, 0] },
+			{ "id": "boost_frequency", "name": "Increase frequency", "desc": "More frequent lights",
 			  "sd": [6, 12, 11], "cm": [0, 0, 1], "last_name": "Double lights", "last_desc": "Two boost lights at once" },
 		] },
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
-			{ "id": "horns", "name": "Horns", "desc": "+1 damage to asteroids and enemies",
+			{ "id": "horns", "name": "Horns", "desc": "+1 damage to all targets",
 			  "sd": [0, 0], "cm": [3, 6] },
 			{ "id": "ram", "name": "Ram", "desc": "Deal damage even on miss",
 			  "sd": [0], "cm": [4] },
 		] },
 		{ "id": "comet", "title": "Comet", "row": 1, "upgrades": [
-			{ "id": "armor", "name": "Armor", "desc": "Asteroid hits slow you down less",
+			{ "id": "armor", "name": "Armor", "desc": "Asteroid hits slow you less",
 			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
 			{ "id": "more_asteroids", "name": "Increase total asteroids", "desc": "+1 asteroid on the ring",
 			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
@@ -409,19 +409,14 @@ func _draw() -> void:
 	# Section boxes (white headers) then cards on top (so a selected card's glow isn't clipped).
 	for box in _section_boxes():
 		var sbox: Rect2 = box.rect
-		_panel(sbox, 18.0, Color(0.12, 0.13, 0.18, 0.85), Color(C_CYAN.r, C_CYAN.g, C_CYAN.b, 0.45), 2.0)
+		_panel(sbox, 18.0, Color(0.12, 0.13, 0.18, 0.85), Color(0, 0, 0, 0), 0.0)
 		_text(sbox.position + Vector2(24, 40), sections[box.si].title, 30, C_TITLE, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_bold)
 	for i in _cards.size():
 		if _cards[i].get("back", false):
 			_draw_back(i)
 		else:
 			_draw_card(i)
-
-	# Footer hint.
-	var hint := "[←↑↓→] move      [SPACE] select"
-	if _arm > 0.0:
-		hint = "[←↑↓→] move"
-	_text(Vector2(o.x, o.y + fs.y - 20), hint, 19, C_DIMTEXT, HORIZONTAL_ALIGNMENT_CENTER, fs.x, _font)
+	# (No footer hint — the BOT_PAD space below the Back button is kept as padding.)
 
 
 func _draw_card(i: int) -> void:
@@ -434,7 +429,6 @@ func _draw_card(i: int) -> void:
 
 	var bg := Color(0.16, 0.18, 0.25) if afford else Color(0.13, 0.13, 0.17)
 	if sel:
-		_sel_glow(r, 0.5 + 0.5 * sin(_t * 4.0))
 		bg = Color(0.20, 0.24, 0.34)
 		_panel(r, 12.0, bg, C_CYAN, 3.0)
 	else:
@@ -458,29 +452,27 @@ func _draw_card(i: int) -> void:
 		_draw_cost(r, c[0], c[1], afford)
 
 	# Description along the bottom (the final tier swaps to its unlock's blurb, alongside last_name).
+	# A `warn` upgrade carries a second, orange line below the description for its catch (e.g. the
+	# light boost costing +1 core).
 	var dsc: String = u.desc
 	if u.has("last_desc") and int(u.level) >= u.sd.size() - 1:
 		dsc = u.last_desc
-	_text(r.position + Vector2(18, r.size.y - 16), dsc, 17, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
+	var warn: String = u.get("warn", "")
+	if warn != "":
+		_text(r.position + Vector2(18, r.size.y - 44), dsc, 25, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
+		_text(r.position + Vector2(18, r.size.y - 16), warn, 19, C_WARN, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
+	else:
+		_text(r.position + Vector2(18, r.size.y - 16), dsc, 25, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
 
 
 # The Back button (a navigable target). "[B]ack" — the bracketed B marks the hotkey.
 func _draw_back(i: int) -> void:
 	var r: Rect2 = _cards[i].rect
 	if i == selected:
-		_sel_glow(r, 0.5 + 0.5 * sin(_t * 4.0))
 		_panel(r, 12.0, Color(0.20, 0.24, 0.34), C_CYAN, 3.0)
 	else:
 		_panel(r, 12.0, Color(0.16, 0.18, 0.25), Color(C_CYAN.r, C_CYAN.g, C_CYAN.b, 0.5), 2.0)
 	_text(r.position + Vector2(0, 37), "[B]ack", 26, C_TEXT, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, _font_bold)
-
-
-# Soft cyan halo behind a selected element.
-func _sel_glow(r: Rect2, pulse: float) -> void:
-	for g in range(4, 0, -1):
-		var gc := C_CYAN
-		gc.a = 0.10 * float(g) / 4.0 * (0.7 + 0.3 * pulse)
-		_panel(r.grow(float(g) * 4.0), 12.0 + float(g) * 4.0, Color(0, 0, 0, 0), gc, 2.0)
 
 
 # Right-aligned cost: a comet segment (rightmost) and/or a stardust segment to its left. Each is

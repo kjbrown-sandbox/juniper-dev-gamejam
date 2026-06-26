@@ -102,8 +102,8 @@ var arrow_tex: Texture2D
 @export var enemy_hit_dist := 70.0      # base SPACE reach for enemies (scaled by reach_mult())
 @export var enemy_contact_dist := 34.0  # proximity at which a passed enemy slows you (item 9)
 @export var threat_speed := 90.0
-@export var threat_hp := 2
-@export var threat_drain :=  0.75
+@export var threat_hp := 1            # base enemy HP (wave 0); +1 per difficulty tier
+@export var threat_drain := 0.3       # base core/s an enemy drains (wave 0); +0.5 per difficulty tier
 @export var ram_radial_tol := 45.0
 @export var ram_ang_tol := 0.18
 @export var ram_hit_mult := 0.7
@@ -543,7 +543,12 @@ func ensure_asteroids() -> void:
 
 
 func spawn_threat() -> void:
-	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + 80.0, "hp": threat_hp, "latched": false, "cd": 0.0, "beep": 0.0 })
+	# Difficulty tier rises each time the wave count grows (every full 4-spawn cycle, see
+	# enemy_count): each tier adds +1 HP and +0.5 core/s drain. Enemies spawn a full ring_gap
+	# beyond the outer ring so they fly in from off-screen rather than popping onto the ring.
+	var tier := threat_spawn_count / 4
+	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + ring_gap,
+		"hp": threat_hp + tier, "drain": threat_drain + 0.5 * tier, "latched": false, "cd": 0.0, "beep": 0.0 })
 
 
 # ── Sealing / progression ──────────────────────────────────
@@ -848,7 +853,7 @@ func _tick_threats(sim: float) -> void:
 				t.radius = ring_r(0)
 				t.latched = true
 		else:
-			core -= threat_drain * sim
+			core -= t.drain * sim
 		# Passing an enemy slows you like an asteroid (on a cooldown). A successful SPACE that
 		# pass sets t.cd, so killing/hitting it skips the slow. With Ramming, a missed-SPACE
 		# collision still slows but chips 1 HP off the enemy.
@@ -1632,6 +1637,11 @@ func _draw_hud(font: Font) -> void:
 		res += "      COMETS %d" % asteroid_mats
 	if res != "":
 		dtext(font, Vector2(22, 56), res, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, style.hud_text)
+		# Floating stardust glow after the STARDUST count, matching the dot on the upgrade screen.
+		var ss := int(round(18.0 * ui_text_scale))
+		var sw := font.get_string_size("STARDUST %d/%d" % [inventory, max_inventory], HORIZONTAL_ALIGNMENT_LEFT, -1, ss).x
+		var pulse := 0.85 + 0.15 * sin(game_time * 3.0)
+		draw_point_glow(Vector2(22 + sw + ss * 0.5, 56 - ss * 0.34), ss * 0.26 * pulse, style.square_ready)
 	# Core too low to make lights: head home to refill (it won't kill you, just dries up).
 	if phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
 		dtext(font, Vector2(22, 104), "CORE LOW — RETURN HOME TO REFILL",

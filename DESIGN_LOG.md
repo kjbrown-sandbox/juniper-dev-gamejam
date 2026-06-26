@@ -279,3 +279,27 @@ The core's role (fuels lights, refills at home) was invisible at both ends. Made
 - **Refill gate relaxed:** recharge only pauses when an enemy is actually ON the inner ring
   (`not core_under_attack()`); a still-traveling enemy no longer blocks it. (Shop still needs the
   board fully clear.)
+
+### Upgrade-screen polish + enemy difficulty curve (2026-06-26)
+
+- **UpgradeMenu.gd visual cleanup:**
+  - Selected card now keeps only its strong cyan border — removed the faint pulsing halo behind it
+    (`_sel_glow` deleted; also dropped from the Back button for a consistent selection style).
+  - Section group boxes (Stardust/Core/…) lost their border but keep the faint darker background, so
+    they read as grouped without the boxed look.
+  - Description text bumped to **size 25** (matching the card titles). Four descriptions were
+    shortened so they still fit one line at that size: core max → "Raise the core's max capacity",
+    Horns → "+1 damage to all targets", Armor → "Asteroid hits slow you less", Vacuum → "Auto-collect
+    Stardust in reach".
+  - Dropped the tier-spoiler tails from base descriptions ("· 4th: Vacuum", "· 3rd: Double lights");
+    the `last_desc` swap still shows the unlock's blurb once you're on that tier.
+  - Refill desc fixed: was a misleading "(1.5 → 20/s)", now just "Core refills faster".
+  - Light-boost catch moved to its own **orange second line**: "Costs +1 core to spawn light boosts"
+    (new `warn` field on an upgrade).
+  - Removed the footer key hint ("[←↑↓→] move  [SPACE] select"); the BOT_PAD space stays as padding.
+- **HUD (Game.gd):** the in-world `STARDUST x/y` readout now has the floating stardust glow dot
+  beside it, matching the upgrade screen.
+- **Enemy difficulty curve:** enemies now start at **1 HP / 0.3 core-per-sec drain** (was flat
+  2 HP / 0.75). Each difficulty tier (every full wave-count bump, `threat_spawn_count / 4`) adds
+  **+1 HP and +0.5/s drain**; drain is now per-enemy (`t.drain`). Enemies also spawn a full
+  `ring_gap` beyond the outer ring (was +80px) so they fly in from off-screen.
