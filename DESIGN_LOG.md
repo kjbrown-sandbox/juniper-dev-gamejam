@@ -127,3 +127,52 @@ centered `PLAY`/`SETTINGS` (pleenko-style StyleBoxFlat hover/press), and a `SETT
   off-screen (camera zoomed in) and sweep in as the camera pulls back.
 - Camera timing is **cubic ease-out** (fast at the start, slows into the landing).
 - Removed the old screen-space drop; `_draw_scene()` now serves both menu (p=0) and intro.
+
+### Balancing & feedback pass (Jun 25)
+
+- **Ring nav is interruptible** — UP/DOWN now retarget the glide from the moon's current
+  radius (`move_r0`) instead of being locked out until a traverse finishes. The seal
+  auto-launch uses the same continue-from-here radius.
+- **"+1 stardust"** popup on square grab (was a bare "+1").
+- **Combo reworked into a straight push multiplier** — combo only climbs on un-missed light
+  hits; gain = base × (1 + (combo-1)·0.25), so combo 3 boosts a light 1.5×. Dropped the old
+  "every 3rd hit" bonus.
+- **MISS power-down** — whiffing SPACE shows "MISS", breaks the combo, and powers the moon
+  down for 1.5s: emissions cut for 1s, ramp back over the next 0.5s, SPACE locked the whole
+  time. (Launch press is exempt.) Replaces the old 0.2s miss cooldown.
+- **Enemies are neon red and "beep"** — recolored in `standard.tres`; each enemy pings a red
+  expanding/fading ring once per second (reuses the `flashes` system with a per-flash `col`).
+- **Core shows health + tweens** — displays `N/5` in its center, glows bright yellow with
+  emission at full (energy now keyed to `core/core_cap`), fades to the menu's dark-purple
+  `planet_sick` (no emission) as it dies, matching the intro hand-off.
+
+### Core polish — centered readout, no bar, launch flare
+
+- **`N/5` is now vertically centered** in the core (baseline offset via the font's
+  ascent/descent at the real 2× draw size; it was anchored at the baseline and rode high).
+- **Removed the core health bar** under the disc — the centered number carries it.
+- **Launch flare** — the core starts dead (`core_lit = 0`, dark-purple, matching the menu
+  hand-off) and flares up to full over `core_flare_time` (0.35s) on the first SPACE, with an
+  expanding yellow light ring + particle burst. Fixes the core popping straight to full and
+  restores the seamless menu→game core match.
+
+### New upgrade-menu scene (`UpgradeMenu.tscn` / `.gd`)
+
+- **Standalone scene**, not yet wired into `Game.gd` (kept separate so it's editable in
+  parallel). Run it on its own (F6) to preview; the host configures it via
+  `configure(unlocked, stardust, stardust_max)` + `open()` and listens for the
+  `purchased(section_id, upgrade_id)` / `closed` / `no_upgrades` signals. It draws itself in
+  the game's purple+cyan / Quantico look (a `Control` with custom `_draw`, like the rest).
+- **Five sections, two upgrades each** (mockup layout): top row Core / Boost / Stardust shows
+  once the Stardust ring is unlocked (`unlocked >= 2`); bottom row Attack / Comet appears and
+  grows the panel taller once the asteroid ring is unlocked (`unlocked >= 3`). Upgrades:
+  Core = max / refill-rate _(stub — mechanic TBD)_; Boost = strength / frequency;
+  Stardust = max-capacity / spawn-rate; Attack = Horns (+1 dmg) / Ram (whiff damage);
+  Comet = Armor / +total asteroids. Costs/levels are placeholder; the host applies the real
+  effect on `purchased`.
+- **Keyboard nav** spatially jumps to the nearest BUYABLE card in the pressed direction
+  (arrows or WASD); you only ever land on a card you can afford. **SPACE buys**, but is armed
+  only after a 1 s delay so a stray light-boost press at open doesn't buy. **B / Esc** backs
+  out. If nothing is buyable, `open()` refuses and flashes **"No upgrades available"**.
+- Top-left readout **"Stardust: x/y"** with a glowing purple dot (same `draw_point_glow`
+  recipe as the rings). Renamed the in-HUD/modal **"STAR DUST"** label to **"STARDUST"**.

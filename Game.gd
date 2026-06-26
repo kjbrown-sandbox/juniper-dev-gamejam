@@ -31,7 +31,7 @@ var arrow_tex: Texture2D
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
 
 # ── Tail / speed ───────────────────────────────────────────
-@export var tail_life := 1.8            # seconds a tail particle lingers; sealing = lap within this time
+@export var tail_life := 2.2            # seconds a tail particle lingers; sealing = lap within this time
 @export var feed_up := 5.0              # +50% of base feed per Bigger-squares level (10->15->20->25)
 # (comet tail color now lives in the reskin palette: style.tail)
 @export var comet_emit_step := 0.04     # rad spacing between emitted tail particles
@@ -59,8 +59,11 @@ var arrow_tex: Texture2D
 @export var max_speed := 4000.0
 @export var boost_base := 100.0
 @export var boost_up := 0.5             # Boost-power upgrade multiplies boost_base by (1 + this)
-@export var combo_every := 3            # every Nth consecutive hit gives a combo boost
-@export var combo_boost_mult := 1.5     # that hit's boost is multiplied by this
+@export var combo_every := 3            # (unused) every Nth consecutive hit gave a combo boost
+@export var combo_boost_mult := 1.5     # (unused) that hit's boost was multiplied by this
+@export var combo_step := 0.25          # each combo above 1 adds this fraction to a light's boost (combo 3 = 1.5x)
+@export var powerdown_time := 1.5       # a MISS powers the moon down for this long (Space locked)
+@export var powerdown_dark := 1.0       # ...fully unlit for this long, then emissions ramp back to full
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
 @export var base_decay := 15.0
 @export var whiff_slow := 0.85
@@ -70,7 +73,8 @@ var arrow_tex: Texture2D
 # ── Core / squares ─────────────────────────────────────────
 @export var core_start := 5.0
 @export var core_cap := 5.0
-@export var core_color_max := 80.0      # core value at which the core glows full light-color (the upgrade ceiling)
+@export var core_color_max := 80.0      # (unused) core value at which the core glowed full light-color
+@export var core_flare_time := 0.35     # at launch the dead core flares up to full over this long
 @export var feed_per_square := 5.0
 @export var material_max := 1             # squares on the ring (doubles per upgrade)
 @export var square_ready_time := 1.0      # s a freshly-spawned square fades in before it's grabbable
@@ -124,7 +128,7 @@ var unlocked := 1
 var current_ring := 0
 var display_radius := 0.0
 var moving := false
-var move_from := 0
+var move_r0 := 0.0        # radius the current glide started from (lets UP/DOWN retarget mid-flight)
 var move_to := 0
 var move_t := 0.0
 var nav_hint_wait := false   # armed at first auto-launch; waiting for the glide to land
@@ -142,6 +146,7 @@ var comet: Array = []     # tail particles: { pos:Vector2, life:float, cum:float
 var cum_angle := 0.0      # unwrapped accumulated rotation (drives the seal span)
 
 var core := 0.0
+var core_lit := 0.0       # 0 = dead-looking (menu hand-off), ramps to 1 as the core flares up at launch
 var inventory := 0        # carried squares = the economy wallet (capped by max_inventory)
 var asteroid_mats := 0
 var overflow_mult := 1    # credits per overflow square (+1 per Bigger-squares level)
@@ -165,6 +170,7 @@ var paused := false
 var confirm_reset := false   # R opens an "are you sure?" overlay before actually resetting
 var confirm_hit: Array = []  # clickable Yes/No regions in the confirm overlay
 var space_cd := 0.0
+var powerdown := 0.0     # seconds remaining in the post-MISS power-down (moon unlit, Space locked)
 var shop_open := false
 var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, action, list, idx }
 
@@ -309,9 +315,12 @@ func reset() -> void:
 	current_ring = 0
 	display_radius = ring_r(0)
 	moving = false
+	move_r0 = ring_r(0)
 	move_t = 0.0
+	powerdown = 0.0
 	banner_timer = 0.0
 	core = core_start
+	core_lit = 0.0
 	inventory = 0
 	asteroid_mats = 0
 	lights.clear()
@@ -499,7 +508,7 @@ func ensure_asteroids() -> void:
 
 
 func spawn_threat() -> void:
-	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + 80.0, "hp": threat_hp, "latched": false, "cd": 0.0 })
+	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + 80.0, "hp": threat_hp, "latched": false, "cd": 0.0, "beep": 0.0 })
 
 
 # ── Sealing / progression ──────────────────────────────────
@@ -526,7 +535,7 @@ func try_seal() -> void:
 	flashes.append({ "pos": Vector2.ZERO, "life": 0.6, "r": ring_r(unlocked - 1) })   # light ring expanding out to the new ring
 	flashes.append({ "pos": mp, "life": 0.6, "r": 220.0 })                            # burst at the launch point
 	# Auto-launch onto the freshly opened ring, carrying momentum (no traverse_cost).
-	move_from = current_ring
+	move_r0 = display_radius
 	move_to = unlocked - 1
 	move_t = 0.0
 	moving = true
@@ -570,6 +579,7 @@ func _process(delta: float) -> void:
 		_tick_play(sim)
 
 	space_cd = maxf(0.0, space_cd - delta)
+	powerdown = maxf(0.0, powerdown - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
 	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
@@ -594,6 +604,7 @@ func _process(delta: float) -> void:
 func _tick_play(sim: float) -> void:
 	if not started:
 		return   # parked at the top until the first SPACE launches us
+	core_lit = minf(1.0, core_lit + sim / maxf(0.01, core_flare_time))   # the launch flare brings the core alive
 	speed = clampf(speed - cur_decay() * sim, min_speed, max_speed)
 
 	# Blaster core drain.
@@ -614,7 +625,7 @@ func _tick_play(sim: float) -> void:
 			if nav_hint_wait:
 				nav_hint_wait = false
 				nav_hint_show = true   # landed on the new outer ring — teach UP/DOWN
-		display_radius = lerpf(ring_r(move_from), ring_r(move_to), move_t)
+		display_radius = lerpf(move_r0, ring_r(move_to), move_t)
 	else:
 		display_radius = ring_r(current_ring)
 
@@ -624,10 +635,11 @@ func _tick_play(sim: float) -> void:
 	angle = wrapf(angle + dlt, -PI, PI)
 	cum_angle += dlt
 	var nsub := clampi(int(dlt / comet_emit_step), 1, 60)
-	for s in range(1, nsub + 1):
-		var f := float(s) / float(nsub)
-		var aa := a0 + dlt * f
-		comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f })
+	if powerdown <= 0.0:   # powered down by a MISS: stop trailing until the moon comes back (1.5s)
+		for s in range(1, nsub + 1):
+			var f := float(s) / float(nsub)
+			var aa := a0 + dlt * f
+			comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f })
 	# Age particles. During a committed seal, FREEZE the oldest (anchor) and never pop it,
 	# so the moon is guaranteed to lap around and make contact (failsafe).
 	for i in range(comet.size()):
@@ -758,6 +770,11 @@ func _tick_threats(sim: float) -> void:
 	for t in threats:
 		if t.cd > 0.0:
 			t.cd -= sim
+		# Beep: a red ring pings out from the enemy once per second.
+		t.beep -= sim
+		if t.beep <= 0.0:
+			t.beep += 1.0
+			flashes.append({ "pos": ring_point(t.radius, t.angle), "life": 0.6, "r": 60.0, "col": style.threat_flying })
 		if not t.latched:
 			t.radius -= threat_speed * sim
 			if t.radius <= ring_r(0):
@@ -819,8 +836,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 	match k:
 		KEY_SPACE:
-			if phase == "play" and space_cd <= 0.0:
-				if not started:
+			if phase == "play" and space_cd <= 0.0 and powerdown <= 0.0:
+				var launching := not started
+				if launching:
 					started = true        # launch: kick off + the boost below
 					speed = start_speed
 					core = core_cap                 # the core is online from the first second
@@ -829,8 +847,17 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					threat_timer = enemy_interval(0)
 					if not music.playing:
 						music.play()    # background music starts on the very first launch, then loops
-				if not try_boost():
-					space_cd = space_cd_time   # only rate-limit a MISS; a hit lets you go again
+					# Flare the core to life: an expanding yellow light ring + a burst from the core.
+					flashes.append({ "pos": Vector2.ZERO, "life": 0.6, "r": 160.0, "col": style.light_idle })
+					shake = minf(2.0, shake + 0.6)
+					for n in 16:
+						particles.append({ "pos": Vector2.ZERO, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 300.0), "life": randf_range(0.3, 0.6) })
+				if not try_boost() and not launching:
+					# A whiff powers the moon down (unlit, Space locked) and breaks the combo.
+					powerdown = powerdown_time
+					combo = 0
+					space_cd = space_cd_time
+					popups.append({ "pos": moon_world() + Vector2(0, -30), "text": "MISS", "life": 0.7, "size": 18 })
 		KEY_B:
 			# Material boost: spend a carried square for a soft (base, unupgraded) speed boost.
 			if phase == "play" and has_material_boost and inventory > 0:
@@ -899,17 +926,19 @@ func can_shop() -> bool:
 
 
 func traverse(dir: int) -> void:
-	if moving or sealing:
+	if sealing:
 		return
-	var target := clampi(current_ring + dir, 0, unlocked - 1)
-	if target == current_ring:
+	# Retarget freely, even mid-glide: base the step on where we're already headed.
+	var base := move_to if moving else current_ring
+	var target := clampi(base + dir, 0, unlocked - 1)
+	if target == base:
 		return
 	hub_pending = false   # leaving the hub cancels a pending shop
 	if dir > 0:
 		speed = maxf(min_speed, speed - traverse_cost)
 	else:
 		speed = minf(max_speed, speed + traverse_cost * 0.5)
-	move_from = current_ring
+	move_r0 = display_radius   # continue from the moon's actual radius, not a ring snap
 	move_to = target
 	move_t = 0.0
 	moving = true
@@ -922,7 +951,7 @@ func collect_square(i: int) -> void:
 	spawn_square()   # replacement appears immediately (not grabbable until it fades in)
 	var mp := ring_point(ring_r(1), ma)
 	flashes.append({ "pos": mp, "life": 0.3 })
-	popups.append({ "pos": mp, "text": "+1", "life": 0.5, "size": 14 })
+	popups.append({ "pos": mp, "text": "+1 stardust", "life": 0.5, "size": 16 })
 
 
 func try_boost() -> bool:
@@ -1020,10 +1049,8 @@ func do_boost(li: int) -> void:
 	var la: float = lights[li]
 	var q := clampf(1.0 - (display_radius * absf(wrapf(angle - la, -PI, PI))) / gate_dist, 0.0, 1.0)
 	combo += 1
-	var gain := boost_base * (0.5 + 0.5 * q)
-	if combo % combo_every == 0:   # every 3rd-in-a-row: a bonus boost
-		gain *= combo_boost_mult
-		popups.append({ "pos": ring_point(display_radius, la) + Vector2(0, -28), "text": "COMBO BOOST", "life": 1.0, "size": 26 })
+	# Combo is a straight multiplier on the push: each step above 1 adds combo_step (combo 3 = 1.5x).
+	var gain := boost_base * (0.5 + 0.5 * q) * (1.0 + float(combo - 1) * combo_step)
 	speed = minf(max_speed, speed + gain)
 	shake = minf(1.6, shake + 0.35 + 0.4 * q)
 	var lp := ring_point(display_radius, la)
@@ -1116,19 +1143,24 @@ func _draw() -> void:
 		col.a = style.tail.a * fa
 		draw_circle(c + cpos * z, comet_dot * z * (0.4 + 0.6 * fa), col)
 
-	# Core — a filled disc (no outline) whose color + emission ramp from the darkest background
-	# (low) up to the light's color at the ceiling (core_color_max), so it brightens/darkens with
-	# health. A rounded fill healthbar beneath shows current core / capacity.
+	# Core — a filled disc (no outline) whose color + emission ramp from the dead-core purple
+	# (low) up to the light's yellow (full), so it brightens/darkens with health. At launch it
+	# flares from dead → full (core_lit) so the menu's dead core comes alive instead of popping.
 	var pr := planet_draw_radius() * z
-	var energy := clampf(core / maxf(1.0, core_color_max), 0.0, 1.0)
+	var energy := clampf(core / maxf(1.0, core_cap), 0.0, 1.0) * core_lit   # full health = bright yellow + emission
 	for gi in range(5, 0, -1):
 		var lt := float(gi) / 5.0
 		var gc := style.light_idle
 		gc.a = energy * 0.55 * (1.0 - lt) * (1.0 - lt)   # strong emission only when energized
 		draw_circle(c, pr * (1.0 + 1.4 * lt), gc)
-	draw_circle(c, pr, style.bg_top.lerp(style.light_idle, energy))
-	if unlocked >= 2:
-		draw_fill_bar(c.x, c.y + pr + 18.0, 190.0, 16.0, clampf(core / maxf(0.01, core_cap), 0.0, 1.0), style.light_idle)
+	draw_circle(c, pr, style.planet_sick.lerp(style.light_idle, energy))   # dead = dark purple (matches the menu)
+	var ht_size := int(round(26.0 * ui_text_scale))
+	var ht_voff := (font.get_ascent(ht_size) - font.get_descent(ht_size)) * 0.5   # baseline → vertical center
+	var ht_pos := c + Vector2(-100.0, ht_voff)
+	var ht_str := "%d/%d" % [clampi(ceili(core), 0, int(core_cap)), int(core_cap)]
+	# Dark outline so the readout stays legible on the vibrant yellow core (and the dark dead core).
+	draw_string_outline(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, maxi(2, int(ht_size * 0.1)), Color(0.1, 0.07, 0.02, 0.9))
+	draw_string(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, style.core_text)
 
 	# Shop is blocked by living enemies: prompt above the planet while waiting at the hub.
 	if hub_pending and not shop_open and current_ring == 0 and not threats.is_empty():
@@ -1200,8 +1232,8 @@ func _draw() -> void:
 	for fl in flashes:
 		var fa := clampf(fl.life / 0.6, 0.0, 1.0)
 		var maxr: float = fl.get("r", 120.0)   # shockwaves pass a larger radius
-		var flcol := style.flash
-		flcol.a = style.flash.a * fa
+		var flcol: Color = fl.get("col", style.flash)   # enemy beeps pass their own (red) color
+		flcol.a *= fa
 		draw_arc(c + fl.pos * z, (1.0 - fa) * maxr + 6.0, 0.0, TAU, 32, flcol, 3.0)
 
 	# Flying star dust (feed animation).
@@ -1221,8 +1253,21 @@ func _draw() -> void:
 			draw_point_glow(c + tpos * z, 5.0 * z, style.square_ready)
 
 	# Moon (the comet head) — the same glowing point as the boost lights, but kept cyan.
+	# After a MISS it powers down: emissions cut for powerdown_dark, then ramp back to full.
 	var mpulse := 0.5 + 0.5 * sin(game_time * 4.0)
-	draw_point_glow(c + moon_world() * z, (moon_radius + 1.5 * mpulse) * z, style.moon_slow.lerp(style.moon_fast, t))
+	var moon_col := style.moon_slow.lerp(style.moon_fast, t)
+	var moon_pos := c + moon_world() * z
+	var emit := 1.0
+	if powerdown > 0.0:
+		var el := powerdown_time - powerdown   # seconds elapsed since the miss
+		emit = 0.0 if el < powerdown_dark else clampf((el - powerdown_dark) / maxf(0.01, powerdown_time - powerdown_dark), 0.0, 1.0)
+	var dim := moon_col
+	dim.a = 0.35   # a faint core dot so the moon never fully vanishes while powered down
+	draw_circle(moon_pos, moon_radius * 0.6 * z, dim)
+	if emit > 0.0:
+		var glow_col := moon_col
+		glow_col.a = moon_col.a * emit
+		draw_point_glow(moon_pos, (moon_radius + 1.5 * mpulse) * z, glow_col)
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
@@ -1457,7 +1502,7 @@ func _draw_hud(font: Font) -> void:
 	# Resource readouts appear only once they matter: star dust at ring 2, star core at ring 3.
 	var res := ""
 	if unlocked >= 2:
-		res = "STAR DUST %d/%d" % [inventory, max_inventory]
+		res = "STARDUST %d/%d" % [inventory, max_inventory]
 	if unlocked >= 3:
 		res += "      COMETS %d" % asteroid_mats
 	if res != "":
@@ -1492,29 +1537,29 @@ func _draw_hud(font: Font) -> void:
 	elif banner_timer > 0.0:
 		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_info)
 
-	# One-time ring-nav hint — "PRESS [↑] AND [↓]" with the arrow icons standing in for the
+	# One-time ring-nav hint — "PRESS [↓] AND [↑]" with the arrow icons standing in for the
 	# words. Laid out by hand (text + icon + text + icon + text) and centered along the top.
 	if nav_hint_show:
 		var hfs := int(round(22.0 * ui_text_scale))
 		var hcol: Color = style.banner_info
-		var p_pre := "PRESS ["
-		var p_mid := "] AND ["
-		var p_end := "]"
+		var p_pre := "PRESS "
+		var p_mid := " AND "
+		var p_end := ""
 		var asc := font.get_ascent(hfs)
 		var isz := float(hfs) * 1.2   # arrow side ≈ text cap height
 		var w_pre := font.get_string_size(p_pre, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
 		var w_mid := font.get_string_size(p_mid, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
 		var w_end := font.get_string_size(p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs).x
 		var hx := sc.x - (w_pre + isz + w_mid + isz + w_end) * 0.5
-		var hbase := 60.0 + asc          # text baseline
-		var hmid := 60.0 + asc * 0.55    # icon vertical center, roughly on the text's midline
+		var hbase := 24.0 + asc          # text baseline (high, clear of the ring's top)
+		var hmid := 24.0 + asc * 0.55    # icon vertical center, roughly on the text's midline
 		draw_string(font, Vector2(hx, hbase), p_pre, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
 		hx += w_pre
-		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, 0.0)
+		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, PI)   # DOWN first (players hit down to dive in)
 		hx += isz
 		draw_string(font, Vector2(hx, hbase), p_mid, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
 		hx += w_mid
-		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, PI)
+		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, 0.0)   # then UP
 		hx += isz
 		draw_string(font, Vector2(hx, hbase), p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
 
@@ -1588,7 +1633,7 @@ func draw_shop_modal(font: Font) -> void:
 	draw_rect(Rect2(px - 3, py - 3, pw + 6, ph + 6), Color(0.45, 0.55, 0.75))   # border
 	draw_rect(Rect2(px, py, pw, ph), Color(0.09, 0.10, 0.14, 0.99))
 	draw_string(font, Vector2(px, py + 48), "UPGRADES", HORIZONTAL_ALIGNMENT_CENTER, pw, 36, Color(1, 1, 0.8))
-	draw_string(font, Vector2(px, py + 88), "STAR DUST %d/%d        COMETS %d        CORE %d/%d" % [inventory, max_inventory, asteroid_mats, int(core), int(core_cap)],
+	draw_string(font, Vector2(px, py + 88), "STARDUST %d/%d        COMETS %d        CORE %d/%d" % [inventory, max_inventory, asteroid_mats, int(core), int(core_cap)],
 		HORIZONTAL_ALIGNMENT_CENTER, pw, 22, Color(0.78, 0.85, 0.95))
 
 	var y := py + head_h
