@@ -36,6 +36,8 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var traverse_cost := 150.0
 @export var view_margin := 0.80
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
+@export var enemy_zoom_time := 1.0      # brief zoom-out to the furthest ring when an enemy wave spawns
+@export var core_low_frac := 0.3        # core HP fraction at/below which the low-core vignette kicks in
 
 # ── Tail / speed ───────────────────────────────────────────
 @export var tail_life := 2.5            # seconds a tail particle lingers; sealing = lap within this time
@@ -136,6 +138,8 @@ var banner_text := ""
 var banner_timer := 0.0
 var hint_text := ""        # transient top-center status hint (e.g. "NO UPGRADES AVAILABLE")
 var hint_timer := 0.0
+var hint_col := Color(1, 1, 1, 1)   # color for the current hint_text
+var enemy_zoom := 0.0      # seconds left of the spawn-time zoom-out to the furthest unlocked ring
 var angle := 0.0
 var speed := 0.0
 var combo := 0
@@ -370,6 +374,7 @@ func reset() -> void:
 	banner_timer = 0.0
 	hint_text = ""
 	hint_timer = 0.0
+	enemy_zoom = 0.0
 	core = core_start
 	core_lit = 0.0
 	inventory = 0
@@ -707,7 +712,11 @@ func _process(delta: float) -> void:
 	slow_iframe = maxf(0.0, slow_iframe - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
-	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
+	enemy_zoom = maxf(0.0, enemy_zoom - delta)
+	var scale_target := desired_scale()
+	if enemy_zoom > 0.0:   # zoom out to frame the furthest unlocked ring while a wave arrives
+		scale_target = minf(scale_target, frame_scale(ring_r(unlocked - 1)))
+	view_scale = lerpf(view_scale, scale_target, clampf(3.0 * delta, 0.0, 1.0))
 	banner_timer = maxf(0.0, banner_timer - delta)
 	hint_timer = maxf(0.0, hint_timer - delta)
 	shake = maxf(0.0, shake - delta * 5.0)
@@ -946,6 +955,8 @@ func _tick_threats(sim: float) -> void:
 				spawn_threat()
 			threat_spawn_count += 1
 			threat_timer = enemy_interval(threat_spawn_count)
+			enemy_zoom = enemy_zoom_time   # pull the camera out to the outer ring for a beat...
+			show_hint("ENEMIES APPROACHING", maxf(enemy_zoom_time, 1.6), style.core_text)   # ...and warn
 
 	for t in threats:
 		if t.cd > 0.0:
@@ -1259,7 +1270,7 @@ func open_upgrades() -> void:
 		shop_open = true
 		upgrade_menu.open()
 	else:
-		show_hint("NO UPGRADES AVAILABLE", 1.6)   # top-center hint instead of the menu's own banner
+		show_hint("NO UPGRADES AVAILABLE", 1.6, style.banner_info)   # top-center hint instead of the menu's own banner
 
 
 # A purchase happened: pull the spent wallets back from the menu, then apply the effect.
@@ -1273,9 +1284,10 @@ func _on_upgrade_closed() -> void:
 	shop_open = false
 
 
-func show_hint(text: String, dur: float) -> void:
+func show_hint(text: String, dur: float, col: Color) -> void:
 	hint_text = text
 	hint_timer = dur
+	hint_col = col
 
 
 # Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. Each section is
@@ -1523,6 +1535,13 @@ func _draw() -> void:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
 		dtext(font, c + pu.pos * z + Vector2(-110, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 220, pu.size, Color(1, 1, 1, qa))
 
+	# Low-core danger vignette: edges darken as the core falls from core_low_frac toward death.
+	if phase == "play":
+		var hp := core / maxf(1.0, core_cap)
+		var vig := clampf((core_low_frac - hp) / maxf(0.01, core_low_frac), 0.0, 1.0)
+		if vig > 0.0:
+			_draw_vignette(get_viewport_rect().size, vig)
+
 	_draw_hud(font)
 
 
@@ -1756,6 +1775,19 @@ func draw_icon(tex: Texture2D, center: Vector2, sz: float, rot: float) -> void:
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
+func _draw_vignette(vp: Vector2, strength: float) -> void:
+	# Stacked translucent rectangle outlines from each edge inward — darkest at the border, fading
+	# toward the center, so the screen edges dim as the core nears death. `strength` is 0..1.
+	var steps := 40
+	var depth := minf(vp.x, vp.y) * 0.42      # how far the darkening reaches from each edge
+	var band := depth / float(steps) + 2.0    # bands overlap a little so they read as a smooth gradient
+	for i in steps:
+		var ft := float(i) / float(steps)     # 0 = screen edge, 1 = innermost
+		var inset := ft * depth
+		var a := strength * (1.0 - ft) * (1.0 - ft) * 0.4   # quadratic falloff, darkest at the edge
+		draw_rect(Rect2(inset, inset, vp.x - 2.0 * inset, vp.y - 2.0 * inset), Color(0, 0, 0, a), false, band)
+
+
 func _draw_hud(font: Font) -> void:
 	var vp := get_viewport_rect().size
 	# Dev readout (bottom-left): live speed + elapsed game time.
@@ -1842,6 +1874,7 @@ func _draw_hud(font: Font) -> void:
 			top_col = style.hud_warn
 		elif hint_timer > 0.0:
 			top_msg = hint_text
+			top_col = hint_col
 		if top_msg != "":
 			draw_top_hint(font, top_msg, top_col)
 
