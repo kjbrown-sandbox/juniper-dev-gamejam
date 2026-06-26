@@ -58,3 +58,62 @@ Refined the standardized look from feedback. Net state now:
 
 New tunables: `core_color_max`. Removed `light_beam_reach`. Each round verified via
 throwaway screenshot scripts (launch, mid-game, shop modal, enemy close-up).
+
+---
+
+## Day 7 (Jun 25) — Main menu (own scene)
+
+Added **`MainMenu.tscn` + `MainMenu.gd`** as the new `main_scene` (was `Game.tscn`). Own scene
+per request (not a Game.gd phase). Node2D root draws the game's look — `standard.tres` palette,
+neon grid drawn **zoomed-in** (`MENU_GRID_MULT 2.6` → big cells = "a tiny piece"), and a glowing
+**hero moon** (the object that will later "fall" into the game) that shines the grid patch under
+it, reusing the committed `_grid_shine` math. UI is **Control nodes built in code** (CanvasLayer):
+centered `PLAY`/`SETTINGS` (pleenko-style StyleBoxFlat hover/press), and a `SETTINGS` panel with a
+0–100 **VOLUME** `HSlider` → `AudioServer.set_bus_volume_db(0, …)` (Master). Menu music =
+`assets/sound/magic space.mp3`, started on first gesture (web autoplay). `PLAY` → hard-cut
+`change_scene_to_file("res://Game.tscn")`.
+
+- **Volume is session-only** (no save system — scope discipline). Add a `ConfigFile` later if wanted.
+- **Deferred (waiting on the other agent's final cell-lighting):** cursor-driven grid shine — hook
+  left in `_draw()` (`_grid_shine(... get_local_mouse_position() ...)`).
+- **Deferred:** the seamless moon-fall + zoom-out hand-off into `Game.tscn` (currently a hard cut).
+
+### Menu update — fall transition, title, audio
+
+- **Title** → "CORE MECHANICS" (`TITLE` const).
+- **Buttons** moved to lower-middle (`_menu_box.anchor_top = 0.40`) so they clear the moon glow.
+- **Moon-fall transition** (`state` menu→intro): on PLAY the hero moon shrinks and the camera
+  pulls back, revealing ring 0 + planet (drawn from mirrored Game constants), landing the moon on
+  the top of ring 0 = Game's exact first frame, then cuts to `Game.tscn` (short crossfade absorbs
+  the cut). Geometry note: game moon starts at the *top* of ring 0, so this is a zoom-out reveal /
+  settle, not a literal downward drop (a true drop would be a `Game.gd` intro cinematic).
+- **Audio:** menu theme = `Space Sprinkles.mp3` (plays on launch; web waits for first gesture).
+  Fades to silent over the fall (player `volume_db` ramp). Volume slider still drives Master bus.
+- **PENDING (Game.gd — other agent's file):** play `magic space.mp3` when the first SPACE-hit lands
+  on ring 1 in-game. Not done here to avoid colliding with their active edits.
+
+### Menu polish round 2
+
+- **Darkening removed** — deleted the end-of-transition crossfade entirely.
+- **Fall reworked** — moon now rises above the revealed ring/core (pull-back), then drops
+  STRAIGHT DOWN onto the top of ring 0 (game start), accelerating with a small settle-bounce.
+  x stays centred (no sideways drift). Lands on the game's exact first frame, no fade.
+- **Grid aligned to the moon** — grid is phased (`fposmod`) so lines cross dead-centre on the
+  moon at rest, so it no longer reads as off-centre. During the fall the grid anchors to centre
+  (stable) while the moon still lights the patch it passes.
+- **Volume slider restyled** — cyan track + filled bar (matches the palette), grabber 2× size
+  (generated circle texture), and a live **NN%** readout to the right of the slider.
+- Menu title is "CORE MECHANICS".
+
+### Menu polish round 3 — seamless drop onto the ring
+
+- Moon now **drops straight down onto the ring's TOP edge** (= the game's exact moon-start spot,
+  `centre + (0,-base_radius)*z_end`), so the cut into Game.tscn is seamless (verified: intro's last
+  frame == game's first frame, moon in the identical position). No rise, x dead-centre.
+- Menu moon moved HIGH (`MENU_MOON_FRAC 0.08`) so it starts above the ring's top and only falls;
+  title moved below it. Mirrored consts fixed to match the game (`MOON_RADIUS 10`).
+- The world **zooms in** (ring + core grow from small, their top rising to meet the falling moon) —
+  this is what lets the moon start high/on-screen and land seamlessly; a literal zoom-OUT would need
+  the moon to start off-screen. Slow (4s). Grid reverted to from-0 (matches the in-game grid).
+- Tiny residual pops at the cut (game adds a yellow launch-boost glow + "PRESS SPACE TO LAUNCH"); the
+  moon itself does not move.

@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://b7mnmenu01a2b"]
+
+[ext_resource type="Script" path="res://MainMenu.gd" id="1_mm"]
+[ext_resource type="Resource" path="res://styles/standard.tres" id="2_style"]
+
+[node name="MainMenu" type="Node2D"]
+script = ExtResource("1_mm")
+style = ExtResource("2_style")
