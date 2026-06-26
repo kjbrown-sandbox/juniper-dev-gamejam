@@ -84,31 +84,32 @@ func default_sections() -> Array:
 	return [
 		{ "id": "stardust", "title": "Stardust", "row": 0, "upgrades": [
 			{ "id": "dust_capacity", "name": "Increase max capacity", "desc": "Carry more Stardust at once",
-			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 0] },
+			  "sd": [1, 5, 10], "cm": [0, 0, 0] },
 			{ "id": "dust_spawn", "name": "Increase spawn rate", "desc": "Stardust spawns more often",
-			  "sd": [1, 3, 6, 10], "cm": [0, 0, 0, 2], "last_name": "Vacuum", "last_desc": "Auto-collect Stardust in reach" },
+			  "sd": [2, 6, 10], "cm": [0, 0, 1], "last_name": "Vacuum", "last_desc": "Auto-collect Stardust in reach" },
 		] },
 		{ "id": "core", "title": "Core", "row": 0, "upgrades": [
 			{ "id": "core_max", "name": "Increase max", "desc": "Raise the core's max capacity",
-			  "sd": [2, 4, 8, 16], "cm": [0, 0, 0, 0] },
+			  "sd": [2, 5, 14], "cm": [0, 0, 0] },
 			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster",
 			  "sd": [3, 7, 12], "cm": [0, 0, 0] },
 		] },
 		{ "id": "boost", "title": "Light boost", "row": 0, "upgrades": [
 			{ "id": "boost_strength", "name": "Increase speed", "desc": "More speed per boost",
-			  "warn": "Costs +1 core to spawn light boosts", "sd": [5, 10, 20], "cm": [0, 0, 0] },
+			  "warn": "Costs +1 core to spawn light boosts", "sd": [5, 10, 20], "cm": [0, 0, 0],
+			  "last_name": "Stardust boost", "last_desc": "Press B: spend Stardust for an extra boost" },
 			{ "id": "boost_frequency", "name": "Increase frequency", "desc": "More frequent lights",
 			  "sd": [6, 12, 11], "cm": [0, 0, 1], "last_name": "Double lights", "last_desc": "Two boost lights at once" },
 		] },
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
 			{ "id": "horns", "name": "Horns", "desc": "+1 damage to all targets",
-			  "sd": [0, 0], "cm": [3, 6] },
+			  "sd": [0, 0, 0], "cm": [1, 3, 6] },
 			{ "id": "ram", "name": "Ram", "desc": "Deal damage even on miss",
 			  "sd": [0], "cm": [4] },
 		] },
 		{ "id": "comet", "title": "Comet", "row": 1, "upgrades": [
-			{ "id": "armor", "name": "Armor", "desc": "Asteroid hits slow you less",
-			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
+			{ "id": "armor", "name": "Armor", "desc": "SPACE-hit asteroids to cut the slowdown",
+			  "sd": [0, 0, 0], "cm": [2, 5, 9] },
 			{ "id": "more_asteroids", "name": "Increase total asteroids", "desc": "+1 asteroid on the ring",
 			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
 		] },
@@ -457,7 +458,9 @@ func _draw_card(i: int) -> void:
 	var dsc: String = u.desc
 	if u.has("last_desc") and int(u.level) >= u.sd.size() - 1:
 		dsc = u.last_desc
-	var warn: String = u.get("warn", "")
+	# A capstone level (last_name swap) grants a different unlock, so its track's warn no longer applies.
+	var on_capstone := u.has("last_name") and int(u.level) >= u.sd.size() - 1
+	var warn: String = "" if on_capstone else u.get("warn", "")
 	if warn != "":
 		_text(r.position + Vector2(18, r.size.y - 44), dsc, 25, C_DIMTEXT, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)
 		_text(r.position + Vector2(18, r.size.y - 16), warn, 19, C_WARN, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 30, _font)

@@ -19,9 +19,16 @@ extends Node2D
 var music: AudioStreamPlayer
 var arrow_tex: Texture2D
 
+# SPACE light-hit collision: a circle at the moon head overlaps a per-light Area2D pool. They live
+# in unzoomed world space (the renderer applies the camera manually in _draw), so overlap is in
+# world px and the head radius is just gate_dist * reach_mult().
+var moon_area: Area2D
+var moon_shape: CircleShape2D
+var light_areas: Array = []   # parallel to `lights`, one Area2D each
+
 # ── Rings ──────────────────────────────────────────────────
-@export var base_radius := 180.0
-@export var ring_gap := 300.0
+@export var ring_radii: Array[float] = [180.0, 430.0, 780.0]   # per-ring radius (inner→outer); non-uniform gaps
+@export var ring_gap := 300.0           # enemy spawn margin: how far beyond the outer ring threats appear
 @export var planet_radius := 40.0
 @export var planet_grow_step := 14.0    # planet heals a step per ring sealed
 @export var moon_radius := 10.0    # matches the boost-light point size (the moon is a cyan one)
@@ -34,7 +41,8 @@ var arrow_tex: Texture2D
 @export var tail_life := 2.2            # seconds a tail particle lingers; sealing = lap within this time
 @export var feed_up := 5.0              # +50% of base feed per Bigger-squares level (10->15->20->25)
 # (comet tail color now lives in the reskin palette: style.tail)
-@export var comet_emit_step := 0.04     # rad spacing between emitted tail particles
+@export var comet_emit_step := 0.04     # (unused) old rad spacing between emitted tail particles
+@export var comet_emit_px := 10.0       # px spacing between emitted tail particles (even on every ring)
 @export var comet_dot := 5.0            # tail particle radius (world px)
 @export var seal_near := 0.70           # tail fraction of full at which the seal cinematic engages
 @export var ui_text_scale := 2.0        # multiplier on all HUD / in-world text sizes (shop modal excluded)
@@ -65,7 +73,7 @@ var arrow_tex: Texture2D
 @export var boost_up := 0.5             # Boost-power upgrade multiplies boost_base by (1 + this)
 @export var combo_every := 3            # (unused) every Nth consecutive hit gave a combo boost
 @export var combo_boost_mult := 1.5     # (unused) that hit's boost was multiplied by this
-@export var combo_step := 0.1           # each combo adds this fraction to a light's boost (combo 1 = 1.1x, 2 = 1.2x, …)
+@export var combo_step := 0.1           # (unused) combos no longer boost speed — see do_boost
 @export var powerdown_time := 1.0       # a MISS powers the moon down for this long (Space locked)
 @export var powerdown_dark := 0.75      # ...fully unlit for this long, then emissions ramp back to full
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
@@ -189,6 +197,7 @@ var has_material_boost := false
 var has_ramming := false
 var has_vacuum := false
 var reach_level := 0      # "Larger space hit" upgrades; reach_mult() = 1 + level/6 (lvl3 = 1.5x)
+var armor_level := 0      # asteroid-armor tier (0-3): mitigates the ring-2 slowdown (see ast_slow_*)
 var hit_damage := 1       # SPACE damage per hit to asteroids/enemies; +1 per Horns level
 var core_refill_rate := 1.5   # core HP/s restored while orbiting home; upgrade ladder 1.5→5→10→20
 var refill_emit := 0.0        # cadence timer for the moon-mote suck-in fluff while recharging
@@ -250,6 +259,15 @@ func _ready() -> void:
 	ul.add_child(upgrade_menu)
 	upgrade_menu.purchased.connect(_on_upgrade_purchased)
 	upgrade_menu.closed.connect(_on_upgrade_closed)
+	# Moon-head collision circle; detects the light areas (layer 2). Sized each frame to reach.
+	moon_area = Area2D.new()
+	moon_area.collision_layer = 0
+	moon_area.collision_mask = 2
+	moon_shape = CircleShape2D.new()
+	var mcs := CollisionShape2D.new()
+	mcs.shape = moon_shape
+	moon_area.add_child(mcs)
+	add_child(moon_area)
 	reset()
 
 
@@ -378,6 +396,7 @@ func reset() -> void:
 	has_ramming = false
 	has_vacuum = false
 	reach_level = 0
+	armor_level = 0
 	hit_damage = 1
 	core_refill_rate = 1.5
 	beam_on = false
@@ -422,7 +441,7 @@ func reset() -> void:
 
 # ── Geometry / view ────────────────────────────────────────
 func ring_r(i: int) -> float:
-	return base_radius + i * ring_gap
+	return ring_radii[clampi(i, 0, ring_radii.size() - 1)]
 
 
 func sealed_count() -> int:
@@ -468,6 +487,20 @@ func reach_mult() -> float:
 	return 1.0 + float(reach_level) / 6.0
 
 
+# Asteroid slowdown multipliers (Armor upgrade). Base penalty is asteroid_hit_mult (e.g. ×0.7).
+func ast_slow_hit() -> float:
+	# Speed × when you SPACE-hit the asteroid: full (no armor), half-penalty (lvl 1), none (lvl 2+).
+	match armor_level:
+		0: return asteroid_hit_mult
+		1: return 1.0 - (1.0 - asteroid_hit_mult) * 0.5
+		_: return 1.0
+
+
+func ast_slow_miss() -> float:
+	# Speed × when you just pass it without a SPACE hit: full penalty, halved once Armor lvl 3.
+	return 1.0 - (1.0 - asteroid_hit_mult) * 0.5 if armor_level >= 3 else asteroid_hit_mult
+
+
 func speed_t() -> float:
 	return clampf(speed / max_speed, 0.0, 1.0)
 
@@ -478,6 +511,8 @@ func tail_span() -> float:
 	# particle faded below 15% opacity is too ghostly to "collide" with, so it doesn't count
 	# — we measure to the oldest particle that's still at least 15% opaque.
 	for cp in comet:   # comet is ordered oldest-first
+		if cp.get("glide", false):
+			continue   # laid down during a ring traversal (off-ring spiral) — doesn't count toward a wrap
 		var lf: float = cp.life
 		var f := clampf(lf / tail_life, 0.0, 1.0)
 		var op := 1.0 - (1.0 - f) * (1.0 - f)   # same ease-out as the draw
@@ -498,6 +533,27 @@ func cur_decay() -> float:
 
 
 # ── Lights ─────────────────────────────────────────────────
+func sync_light_areas() -> void:
+	# One Area2D per live light, positioned in world space; the head circle tracks the reach upgrade.
+	while light_areas.size() < lights.size():
+		var a := Area2D.new()
+		a.collision_layer = 2
+		a.collision_mask = 0
+		var cs := CollisionShape2D.new()
+		var sh := CircleShape2D.new()
+		sh.radius = 10.0
+		cs.shape = sh
+		a.add_child(cs)
+		add_child(a)
+		light_areas.append(a)
+	while light_areas.size() > lights.size():
+		(light_areas.pop_back() as Area2D).queue_free()
+	for i in lights.size():
+		light_areas[i].position = ring_point(display_radius, lights[i])
+	moon_area.position = moon_world()
+	moon_shape.radius = gate_dist * reach_mult()
+
+
 func aligned_light() -> int:
 	# Acceptance is by along-ring DISTANCE (px), so it's the same window on every ring.
 	for i in lights.size():
@@ -618,6 +674,7 @@ func _process(delta: float) -> void:
 	if sim > 0.0:
 		_tick_play(sim)
 
+	sync_light_areas()   # keep the collision pool tracking the live lights + moon head
 	space_cd = maxf(0.0, space_cd - delta)
 	powerdown = maxf(0.0, powerdown - delta)
 	cam_focus = Vector2.ZERO
@@ -659,7 +716,8 @@ func _tick_play(sim: float) -> void:
 			move_t = 1.0
 			moving = false
 			current_ring = move_to
-			comet.clear()   # drop the spiral tail from the glide — a seal needs a full lap made ON the ring
+			# Keep the glide spiral visible (it fades on its own). It's tagged `glide` so it doesn't
+			# count toward the seal wrap — a seal still needs a full lap made ON the ring.
 			if current_ring == 0:
 				arrive_at_hub()   # bank squares + open the upgrade screen
 			if nav_hint_wait:
@@ -674,12 +732,14 @@ func _tick_play(sim: float) -> void:
 	var dlt := (speed / display_radius) * sim
 	angle = wrapf(angle + dlt, -PI, PI)
 	cum_angle += dlt
-	var nsub := clampi(int(dlt / comet_emit_step), 1, 60)
+	var arc := speed * sim   # arc length traversed this frame (= display_radius * dlt); spacing is per-distance
+	var nsub := clampi(int(arc / comet_emit_px), 1, 60)
 	if powerdown <= 0.0:   # powered down by a MISS: stop trailing until the moon comes back (1s)
 		for s in range(1, nsub + 1):
 			var f := float(s) / float(nsub)
 			var aa := a0 + dlt * f
-			comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f })
+			# `glide`: dropped mid-traversal (wrong radius) — excluded from the seal-wrap measure.
+			comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f, "glide": moving })
 	# Age particles. During a committed seal, FREEZE the oldest (anchor) and never pop it,
 	# so the moon is guaranteed to lap around and make contact (failsafe).
 	for i in range(comet.size()):
@@ -691,6 +751,17 @@ func _tick_play(sim: float) -> void:
 			comet.pop_front()
 		while comet.size() > 2000:
 			comet.pop_front()
+
+	# Passing a light without hitting SPACE breaks the combo (the moment it leaves your reach behind
+	# you). If you'd pressed in time it'd already be gone (do_boost removes it). "COMBO BREAK" flashes
+	# above the light only if it actually snapped a streak (combo > 1).
+	if powerdown <= 0.0:
+		var gate_ang := (gate_dist * reach_mult()) / display_radius   # half-window in radians
+		for la in lights:
+			if wrapf(la + gate_ang - a0, 0.0, TAU) <= dlt:   # crossed the trailing edge this frame
+				if combo > 1:
+					popups.append({ "pos": ring_point(display_radius, la) + Vector2(0, -34), "text": "COMBO BREAK", "life": 0.8, "size": 18 })
+				combo = 0
 
 	try_seal()
 
@@ -760,13 +831,13 @@ func _tick_play(sim: float) -> void:
 			ast.angle = wrapf(ast.angle - asteroid_speed * sim, -PI, PI)
 			if ast.cd > 0.0:
 				ast.cd -= sim
-		# Passing an asteroid on the ring slows you (always, on a cooldown) — damaging it
-		# requires SPACE (handled in try_boost). Horns II removes the slowdown.
+		# Passing an asteroid slows you (on a cooldown). A correct SPACE hit (try_boost) sets the
+		# asteroid's cd first, so this passive slow only fires when you DIDN'T hit it — and Armor
+		# lvl 3 softens even that (ast_slow_miss).
 		if current_ring == 2:
 			for ast in asteroids:
 				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
-					if not has_horns2:
-						speed = speed * asteroid_hit_mult
+					speed = speed * ast_slow_miss()
 					ast.cd = asteroid_hit_cd
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
@@ -923,7 +994,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					space_cd = space_cd_time
 					popups.append({ "pos": moon_world() + Vector2(0, -30), "text": "MISS", "life": 0.7, "size": 18 })
 		KEY_B:
-			# Material boost: spend a carried square for a soft (base, unupgraded) speed boost.
+			# Stardust boost: spend a carried Stardust for a soft (base, unupgraded) speed boost.
 			if phase == "play" and has_material_boost and inventory > 0:
 				inventory -= 1
 				speed = minf(max_speed, speed + _base.boost_base)
@@ -931,7 +1002,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				shake = minf(1.6, shake + 0.3)
 				for i in 10:
 					particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(110.0, 240.0), "life": randf_range(0.25, 0.5) })
-				popups.append({ "pos": bp, "text": "MATERIAL BOOST", "life": 0.8, "size": 18 })
+				popups.append({ "pos": bp, "text": "STARDUST BOOST", "life": 0.8, "size": 18 })
 		KEY_UP:
 			if phase == "play":
 				if nav_hint_show:
@@ -1022,8 +1093,9 @@ func try_boost() -> bool:
 	# on the boosted lights, reaching 2× the square-grab radius. It sweeps squares, asteroids, and
 	# enemies in that blast (Euclidean), on top of the normal per-target reach below.
 	var shock_pts: Array[Vector2] = []
+	var hit_areas := moon_area.get_overlapping_areas()   # real circle overlap, not along-ring math
 	for i in range(lights.size() - 1, -1, -1):
-		if display_radius * absf(wrapf(angle - lights[i], -PI, PI)) <= gate_dist * rm:
+		if i < light_areas.size() and light_areas[i] in hit_areas:
 			shock_pts.append(ring_point(display_radius, lights[i]))
 			do_boost(i)
 			did = true
@@ -1055,7 +1127,7 @@ func try_boost() -> bool:
 				collect_square(i)
 				did = true
 
-	# Enemies — normal reach (with the mid-air instakill) OR the shockwave (always a normal 1 HP).
+	# Enemies — normal reach (with the mid-air instakill) OR the shockwave (an outright kill).
 	var hit_enemy := false
 	for t in threats:
 		var ep := ring_point(t.radius, t.angle)
@@ -1064,8 +1136,8 @@ func try_boost() -> bool:
 		if not (in_normal or in_shock):
 			continue
 		var midair: bool = in_normal and moving and not t.latched
-		if midair:
-			t.hp = 0
+		if midair or in_shock:
+			t.hp = 0   # a light-boost shockwave shatters enemies outright, like asteroids
 		else:
 			t.hp -= hit_damage   # Horns raises hit_damage (+1 per level)
 		t.cd = asteroid_hit_cd   # a successful hit suppresses the contact-slow this pass
@@ -1088,7 +1160,13 @@ func try_boost() -> bool:
 			var in_shock_a: bool = shock and shock_c.distance_to(ap) < shock_r
 			if not (in_normal_a or in_shock_a):
 				continue
-			ast.hits_left -= hit_damage   # Horns raises hit_damage (+1 per level)
+			if in_shock_a:
+				ast.hits_left = 0   # a light-boost shockwave shatters asteroids outright, regardless of HP
+			else:
+				ast.hits_left -= hit_damage   # Horns raises hit_damage (+1 per level)
+			if in_normal_a:
+				speed = speed * ast_slow_hit()   # a timed hit takes the (Armor-reduced) slow, not the passive one
+				ast.cd = asteroid_hit_cd          # ...and suppresses this pass's passive slow
 			hit_ast = true
 			did = true
 			shake = minf(1.8, shake + 0.3)
@@ -1107,8 +1185,8 @@ func do_boost(li: int) -> void:
 	var la: float = lights[li]
 	var q := clampf(1.0 - (display_radius * absf(wrapf(angle - la, -PI, PI))) / gate_dist, 0.0, 1.0)
 	combo += 1
-	# Combo is a straight multiplier on the push: each combo adds combo_step (combo 1 = 1.1x, 2 = 1.2x, …).
-	var gain := boost_base * (0.5 + 0.5 * q) * (1.0 + float(combo) * combo_step)
+	# Combo no longer boosts speed — it only tracks the streak (broken by passing a light, see _tick_play).
+	var gain := boost_base * (0.5 + 0.5 * q)
 	speed = minf(max_speed, speed + gain)
 	shake = minf(1.6, shake + 0.35 + 0.4 * q)
 	var lp := ring_point(display_radius, la)
@@ -1155,33 +1233,36 @@ func _on_upgrade_closed() -> void:
 	shop_open = false
 
 
-# Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. The new
-# upgrades reuse the old tech-tree ladders; a couple have a special 4th tier (Vacuum, Double
-# lights). `core_refill_rate` sets the core's home-ring recharge speed (HP/s).
+# Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. A couple of
+# tracks turn their final level into a special unlock (Vacuum at dust_spawn L3, Double lights at
+# boost_frequency L3). `core_refill_rate` sets the core's home-ring recharge speed (HP/s).
 func apply_upgrade(id: String, level: int) -> void:
 	match id:
 		"core_max":
-			core_cap *= 2.0                                    # ×2 per level (2/4/8/16 stardust)
+			core_cap = [5.0, 15.0, 35.0, 80.0][level]          # core max: base 5, 1→15, 2→35, 3→80 (2/5/14 stardust)
 		"core_refill":
 			core_refill_rate = [1.5, 5.0, 10.0, 20.0][level]   # core HP/s while orbiting home: base 1.5, 1→5, 2→10, 3→20
 		"boost_strength":
-			boost_base *= (1.0 + boost_up)                     # old "Boost light": +speed...
-			light_cost += 1.0                                  # ...but +1 core per light (the tradeoff)
+			if level <= 2:
+				boost_base *= 2.0                              # ×2 speed per boost...
+				light_cost += 1.0                              # ...but +1 core per light (the tradeoff)
+			else:
+				has_material_boost = true                      # 3rd tier = "Stardust boost" (press B to spend Stardust)
 		"boost_frequency":
 			if level <= 2:
 				light_delay = [light_delay, 1.5, 1.0][level]   # old "Faster lights": 1.5s then 1.0s
 			else:
 				light_count = 2                                # 3rd tier = "Double lights"
 		"dust_capacity":
-			max_inventory += [0, 3, 4, 5, 5][level]            # carry 6 / 10 / 15 / 20
+			max_inventory = [3, 8, 15, 25][level]              # carry: base 3, 1→8, 2→15, 3→25 (1/5/10 stardust)
 		"dust_spawn":
-			if level <= 3:
-				material_max += 1                              # +1 stardust on the ring
-			else:
-				has_vacuum = true                              # 4th tier = "Vacuum"
+			match level:
+				1: material_max += 1                           # +1 stardust on the ring
+				2: material_max += 2                           # +2 more (total +3 over the base)
+				3: has_vacuum = true                           # 3rd tier = "Vacuum"
 		"horns":           has_horns = true; hit_damage += 1
 		"ram":             has_ramming = true
-		"armor":           asteroid_hit_mult = minf(1.0, asteroid_hit_mult + 0.1)   # less slowdown
+		"armor":           armor_level = level   # 1: half-slow on a SPACE hit · 2: no slow on a hit · 3: also softens a miss
 		"more_asteroids":  asteroid_max += 1
 
 
