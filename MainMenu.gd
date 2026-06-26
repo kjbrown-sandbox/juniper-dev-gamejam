@@ -32,10 +32,14 @@ var volume := DEFAULT_VOLUME
 var state := "menu"                 # menu | intro
 var intro_t := 0.0
 
+const LOGO_W := 300.0               # bottom-right brand mark width (px); height follows the art's aspect
+const LOGO_MARGIN := 64.0           # px from the bottom-right corner
+
 var _ui: CanvasLayer
 var _title: Label
 var _menu_box: Control
 var _settings_box: Control
+var _logo: TextureRect
 var _pct_label: Label
 var _music: AudioStreamPlayer
 var _music_started := false
@@ -301,6 +305,21 @@ func _build_ui() -> void:
 	_settings_box.visible = false
 	_ui.add_child(_settings_box)
 
+	# 8-bit Curls brand mark, pinned to the bottom-right corner.
+	_logo = TextureRect.new()
+	_logo.texture = load("res://assets/icons/8bit-curls-logo-white.png")
+	_logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT
+	_logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var tex_size := _logo.texture.get_size()
+	var logo_h := LOGO_W * (tex_size.y / tex_size.x)
+	_logo.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_logo.offset_left = -LOGO_W - LOGO_MARGIN
+	_logo.offset_top = -logo_h - LOGO_MARGIN
+	_logo.offset_right = -LOGO_MARGIN
+	_logo.offset_bottom = -LOGO_MARGIN
+	_ui.add_child(_logo)
+
 
 func _make_center() -> Control:
 	var cc := CenterContainer.new()
@@ -357,6 +376,7 @@ func _on_play() -> void:
 	_title.visible = false
 	_menu_box.visible = false
 	_settings_box.visible = false
+	_logo.visible = false
 	if not _music_started:
 		_start_music()
 
