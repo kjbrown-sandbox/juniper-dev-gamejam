@@ -22,7 +22,7 @@ signal no_upgrades                                         # open() refused: not
 @export var stardust_max := 12     # carry cap (shown as "Stardust: x/y")
 @export var comets := 6            # comet wallet (bottom row: Attack / Comet)
 @export var auto_open_for_preview := true   # run the scene on its own and it opens itself
-@export var buy_arm_delay := 1.0   # ignore SPACE for this long after opening (stray boosts)
+@export var buy_arm_delay := 0.25  # ignore SPACE for this long after opening (stray boosts)
 
 # ── Look (tuned to styles/standard.tres so it matches the rings) ───────────
 const C_DIM       := Color(0, 0, 0, 0.72)
@@ -55,8 +55,8 @@ var sections: Array = []     # the five sections (built in _ready)
 var _cards: Array = []       # [{ rect, center, si, ui }] for the currently-shown rows
 var selected := -1           # index into _cards (only ever a buyable card)
 var _mode := "closed"        # "closed" | "open" | "no_upgrades"
-var _arm := 0.0              # counts down from buy_arm_delay; SPACE disabled until 0
 var _no_up := 0.0            # "No upgrades available" banner timer
+var _arm := 0.0              # counts down from buy_arm_delay; SPACE disabled until 0
 var _t := 0.0               # animation clock (pulses)
 
 
@@ -64,7 +64,7 @@ func _ready() -> void:
 	_font = load("res://assets/fonts/Quantico/Quantico-Regular.ttf")
 	_font_bold = load("res://assets/fonts/Quantico/Quantico-Bold.ttf")
 	set_anchors_preset(Control.PRESET_FULL_RECT)
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mouse_filter = Control.MOUSE_FILTER_STOP   # receive clicks (click-to-buy)
 	sections = default_sections()
 	for s in sections:
 		for u in s.upgrades:
@@ -83,35 +83,34 @@ func default_sections() -> Array:
 	# Top-row order = the visit reveal order (Stardust, then Core, then Light boost).
 	return [
 		{ "id": "stardust", "title": "Stardust", "row": 0, "upgrades": [
-			{ "id": "dust_capacity", "name": "Increase max capacity", "desc": "Carry more Stardust at once",
-			  "sd": [1, 5, 10], "cm": [0, 0, 0] },
-			{ "id": "dust_spawn", "name": "Increase spawn rate", "desc": "Stardust spawns more often",
-			  "sd": [2, 6, 10], "cm": [0, 0, 1], "last_name": "Vacuum", "last_desc": "Auto-collect Stardust in reach" },
+			{ "id": "dust_main", "name": "Basic", "desc": "Hold more Stardust",
+			  "sd": [1, 6, 10], "cm": [0, 0, 0] },
+			{ "id": "dust_premium", "name": "Vacuum", "desc": "Auto-collect Stardust in reach",
+			  "sd": [5], "cm": [1], "premium": true },
 		] },
 		{ "id": "core", "title": "Core", "row": 0, "upgrades": [
-			{ "id": "core_max", "name": "Increase max", "desc": "Raise the core's max capacity",
-			  "sd": [2, 5, 14], "cm": [0, 0, 0] },
-			{ "id": "core_refill", "name": "Increase refill rate", "desc": "Core refills faster",
-			  "sd": [3, 7, 12], "cm": [0, 0, 0] },
+			{ "id": "core_main", "name": "Basic", "desc": "Increase core power",
+			  "sd": [2, 7, 12], "cm": [0, 0, 0] },
+			{ "id": "core_premium", "name": "Overfill", "desc": "Charge past full, up to 1.5×",
+			  "sd": [6], "cm": [1], "premium": true },
 		] },
 		{ "id": "boost", "title": "Light boost", "row": 0, "upgrades": [
-			{ "id": "boost_strength", "name": "Increase speed", "desc": "More speed per boost",
-			  "warn": "Costs +1 core to spawn light boosts", "sd": [5, 10, 20], "cm": [0, 0, 0],
-			  "last_name": "Stardust boost", "last_desc": "Press B: spend Stardust for an extra boost" },
-			{ "id": "boost_frequency", "name": "Increase frequency", "desc": "More frequent lights",
-			  "sd": [6, 12, 11], "cm": [0, 0, 1], "last_name": "Double lights", "last_desc": "Two boost lights at once" },
+			{ "id": "boost_main", "name": "Basic", "desc": "Faster, stronger lights",
+			  "warn": "Costs +1 core to spawn light boosts", "sd": [3, 10, 20], "cm": [0, 0, 0] },
+			{ "id": "boost_premium", "name": "Double lights", "desc": "Two boost lights at once",
+			  "sd": [8], "cm": [1], "premium": true },
 		] },
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
-			{ "id": "horns", "name": "Horns", "desc": "+1 damage to all targets",
-			  "sd": [0, 0, 0], "cm": [1, 3, 6] },
-			{ "id": "ram", "name": "Ram", "desc": "Deal damage even on miss",
-			  "sd": [0], "cm": [4] },
+			{ "id": "atk_main", "name": "Basic", "desc": "+1 damage, less asteroid slowdown",
+			  "sd": [0, 0, 0], "cm": [1, 4, 9] },
+			{ "id": "atk_premium", "name": "Ram", "desc": "Deal damage even on miss",
+			  "sd": [10], "cm": [2], "premium": true },
 		] },
 		{ "id": "comet", "title": "Comet", "row": 1, "upgrades": [
-			{ "id": "armor", "name": "Armor", "desc": "SPACE-hit asteroids to cut the slowdown",
-			  "sd": [0, 0, 0], "cm": [2, 5, 9] },
-			{ "id": "more_asteroids", "name": "Increase total asteroids", "desc": "+1 asteroid on the ring",
-			  "sd": [0, 0, 0], "cm": [3, 6, 9] },
+			{ "id": "comet_main", "name": "Basic", "desc": "+1 comet on the ring",
+			  "sd": [0, 0, 0], "cm": [1, 4, 9] },
+			{ "id": "comet_premium", "name": "Comet boost", "desc": "Comets grant a speed boost",
+			  "sd": [10], "cm": [1], "premium": true },
 		] },
 	]
 
@@ -131,20 +130,29 @@ func section_tint(si: int) -> Color:
 	return C_PURPLE if int(sections[si].row) == 0 else C_COMET
 
 
+# A premium upgrade (the section's 2nd card) is locked until its main track (card 0) is fully
+# maxed — i.e. all of its levels, including the final one, have been bought.
+func _premium_locked(si: int, ui: int) -> bool:
+	var u: Dictionary = sections[si].upgrades[ui]
+	if not u.get("premium", false):
+		return false
+	var main: Dictionary = sections[si].upgrades[0]
+	return int(main.level) < main.sd.size()
+
+
 func can_buy(si: int, ui: int) -> bool:
 	var u: Dictionary = sections[si].upgrades[ui]
-	if is_maxed(u):
+	if is_maxed(u) or _premium_locked(si, ui):
 		return false
 	var c := cost_of(u)
 	return stardust >= c[0] and comets >= c[1]
 
 
-# A top-row section (Stardust/Core/Light boost) shows once it's been revealed (`si < reveal`,
-# since the array order IS the reveal order). The bottom row (Attack/Comet) shows once the
-# asteroid ring is unlocked, independent of the visit schedule.
+# All three top-row sections (Stardust/Core/Light boost) show at once now. The bottom row
+# (Attack/Comet) still appears only once the asteroid ring is unlocked.
 func _section_visible(si: int) -> bool:
 	if int(sections[si].row) == 0:
-		return si < reveal
+		return true
 	return unlocked >= 3
 
 
@@ -297,7 +305,11 @@ func _selectable(card: Dictionary) -> bool:
 func _select_first() -> void:
 	selected = -1
 	for i in _cards.size():
-		if _buyable_card(_cards[i]):   # land on a real upgrade, never default onto Back
+		if _buyable_card(_cards[i]):   # land on a real upgrade first
+			selected = i
+			return
+	for i in _cards.size():            # nothing buyable -> focus the Back button
+		if _cards[i].get("back", false):
 			selected = i
 			return
 
@@ -305,6 +317,17 @@ func _select_first() -> void:
 # ── Input ──────────────────────────────────────────────────────────────────
 func _input(event: InputEvent) -> void:
 	if _mode != "open":
+		return
+	# Click-to-buy: a left click on a card selects it and buys/closes (same path as SPACE).
+	if event is InputEventMouseButton and event.pressed and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		var mp: Vector2 = (event as InputEventMouseButton).position
+		for i in _cards.size():
+			if _selectable(_cards[i]) and (_cards[i].rect as Rect2).has_point(mp):
+				selected = i
+				_try_buy()
+				break
+		get_viewport().set_input_as_handled()
+		queue_redraw()
 		return
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
@@ -427,6 +450,12 @@ func _draw_card(i: int) -> void:
 	var maxed := is_maxed(u)
 	var afford := can_buy(card.si, card.ui)
 	var sel := i == selected
+
+	# A locked premium card shows nothing but the word LOCKED (no name/pips/cost/desc).
+	if _premium_locked(card.si, card.ui):
+		_panel(r, 12.0, Color(0.13, 0.13, 0.17), Color(0, 0, 0, 0), 0.0)
+		_text(r.position + Vector2(0, r.size.y * 0.5 + 9), "LOCKED", 26, C_DIMTEXT, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, _font_bold)
+		return
 
 	var bg := Color(0.16, 0.18, 0.25) if afford else Color(0.13, 0.13, 0.17)
 	if sel:

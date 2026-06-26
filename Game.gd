@@ -33,12 +33,12 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var planet_grow_step := 14.0    # planet heals a step per ring sealed
 @export var moon_radius := 10.0    # matches the boost-light point size (the moon is a cyan one)
 @export var traverse_time := 2.0
-@export var traverse_cost := 200.0
+@export var traverse_cost := 150.0
 @export var view_margin := 0.80
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
 
 # ── Tail / speed ───────────────────────────────────────────
-@export var tail_life := 2.2            # seconds a tail particle lingers; sealing = lap within this time
+@export var tail_life := 2.5            # seconds a tail particle lingers; sealing = lap within this time
 @export var feed_up := 5.0              # +50% of base feed per Bigger-squares level (10->15->20->25)
 # (comet tail color now lives in the reskin palette: style.tail)
 @export var comet_emit_step := 0.04     # (unused) old rad spacing between emitted tail particles
@@ -50,6 +50,8 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var seal_zoom := 1.9            # camera punch-in during the seal
 @export var seal_zoom_time := 0.5       # s to become fully zoomed in
 @export var gate_dist := 70.0          # px along the ring to accept a light (same on every ring)
+@export var speed_reach_full := 1500.0  # speed at which the SPACE-hit area reaches its max multiplier
+@export var speed_reach_mult := 2.0     # max hit-area multiplier (at/above speed_reach_full)
 @export var light_delay := 2.0
 @export var light_delay_jitter := 0.25
 @export var light_cost := 1.0
@@ -69,13 +71,13 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var death_speed := 0.0
 @export var stall_decay := 120.0
 @export var max_speed := 4000.0
-@export var boost_base := 100.0
+@export var boost_base := 125.0
 @export var boost_up := 0.5             # Boost-power upgrade multiplies boost_base by (1 + this)
 @export var combo_every := 3            # (unused) every Nth consecutive hit gave a combo boost
 @export var combo_boost_mult := 1.5     # (unused) that hit's boost was multiplied by this
 @export var combo_step := 0.1           # (unused) combos no longer boost speed — see do_boost
-@export var powerdown_time := 1.0       # a MISS powers the moon down for this long (Space locked)
-@export var powerdown_dark := 0.75      # ...fully unlit for this long, then emissions ramp back to full
+@export var powerdown_time := 0.5       # a MISS powers the moon down for this long (Space locked)
+@export var powerdown_dark := 0.3       # ...fully unlit for this long, then emissions ramp back to full
 @export var sealed_decay_mult := 0.5    # core decay on a SEALED ring is halved
 @export var base_decay := 15.0
 @export var whiff_slow := 0.85
@@ -132,6 +134,8 @@ var dead_reason := ""
 var top_angle := -PI / 2.0
 var banner_text := ""
 var banner_timer := 0.0
+var hint_text := ""        # transient top-center status hint (e.g. "NO UPGRADES AVAILABLE")
+var hint_timer := 0.0
 var angle := 0.0
 var speed := 0.0
 var combo := 0
@@ -185,6 +189,7 @@ var confirm_reset := false   # R opens an "are you sure?" overlay before actuall
 var confirm_hit: Array = []  # clickable Yes/No regions in the confirm overlay
 var space_cd := 0.0
 var powerdown := 0.0     # seconds remaining in the post-MISS power-down (moon unlit, Space locked)
+var slow_iframe := 0.0   # global "i-frame": you can only be contact-slowed once per second
 var shop_open := false
 var shop_visits := 0       # times the upgrade screen has opened this run (drives section reveal)
 var shop_hit: Array = []   # clickable regions in the upgrade modal: { rect, action, list, idx }
@@ -196,6 +201,8 @@ var has_blasters := false
 var has_material_boost := false
 var has_ramming := false
 var has_vacuum := false
+var has_overfill := false       # Core premium: core can overfill past core_cap up to 1.5× (bright white)
+var has_asteroid_boost := false # Comet premium: destroying an asteroid grants a speed boost
 var reach_level := 0      # "Larger space hit" upgrades; reach_mult() = 1 + level/6 (lvl3 = 1.5x)
 var armor_level := 0      # asteroid-armor tier (0-3): mitigates the ring-2 slowdown (see ast_slow_*)
 var hit_damage := 1       # SPACE damage per hit to asteroids/enemies; +1 per Horns level
@@ -248,6 +255,7 @@ func _ready() -> void:
 		"asteroid_hit_mult": asteroid_hit_mult,
 		"asteroid_max": asteroid_max,
 		"threat_hp": threat_hp,
+		"min_speed": min_speed,
 	}
 	# Upgrade screen (its own scene). It lives on a CanvasLayer so it draws on top in screen
 	# space; we drive it via configure()/open() and react to its purchased/closed signals.
@@ -358,7 +366,10 @@ func reset() -> void:
 	move_r0 = ring_r(0)
 	move_t = 0.0
 	powerdown = 0.0
+	slow_iframe = 0.0
 	banner_timer = 0.0
+	hint_text = ""
+	hint_timer = 0.0
 	core = core_start
 	core_lit = 0.0
 	inventory = 0
@@ -395,6 +406,8 @@ func reset() -> void:
 	has_material_boost = false
 	has_ramming = false
 	has_vacuum = false
+	has_overfill = false
+	has_asteroid_boost = false
 	reach_level = 0
 	armor_level = 0
 	hit_damage = 1
@@ -415,6 +428,7 @@ func reset() -> void:
 	asteroid_hit_mult = _base.asteroid_hit_mult
 	asteroid_max = _base.asteroid_max
 	threat_hp = _base.threat_hp
+	min_speed = _base.min_speed
 	overflow_mult = 1   # pure runtime var, base is always 1
 	make_shops()
 	trail.clear()
@@ -482,9 +496,11 @@ func ring_point(r: float, a: float) -> Vector2:
 
 
 func reach_mult() -> float:
-	# SPACE-hit reach grows with "Larger space hit": +1/6 per level, so level 3 = 1.5x (the
-	# old default size), level 4 keeps the same step (1.667x).
-	return 1.0 + float(reach_level) / 6.0
+	# Every SPACE-hit window (lights, stardust, enemies, asteroids, shockwave) scales with speed:
+	# 1× when slow, lerping up to speed_reach_mult (2×) at speed_reach_full and capped there — faster
+	# = easier to hit. (reach_level is the old, now-unused "Larger space hit" ladder, stuck at 0.)
+	var f := clampf(speed / speed_reach_full, 0.0, 1.0)
+	return (1.0 + float(reach_level) / 6.0) * lerpf(1.0, speed_reach_mult, f)
 
 
 # Asteroid slowdown multipliers (Armor upgrade). Base penalty is asteroid_hit_mult (e.g. ×0.7).
@@ -501,6 +517,11 @@ func ast_slow_miss() -> float:
 	return 1.0 - (1.0 - asteroid_hit_mult) * 0.5 if armor_level >= 3 else asteroid_hit_mult
 
 
+func core_max_eff() -> float:
+	# Effective core ceiling: the Core-premium "overfill" upgrade lets it charge to 1.5× core_cap.
+	return core_cap * (1.5 if has_overfill else 1.0)
+
+
 func speed_t() -> float:
 	return clampf(speed / max_speed, 0.0, 1.0)
 
@@ -511,8 +532,11 @@ func tail_span() -> float:
 	# particle faded below 15% opacity is too ghostly to "collide" with, so it doesn't count
 	# — we measure to the oldest particle that's still at least 15% opaque.
 	for cp in comet:   # comet is ordered oldest-first
-		if cp.get("glide", false):
-			continue   # laid down during a ring traversal (off-ring spiral) — doesn't count toward a wrap
+		# Only particles laid down ON the current ring count toward a wrap — exclude the glide spiral
+		# AND any still-fading particles from a ring we just left (else a cross-ring rotation can
+		# false-seal the next ring the instant we land on it).
+		if cp.get("glide", false) or cp.get("ring", current_ring) != current_ring:
+			continue
 		var lf: float = cp.life
 		var f := clampf(lf / tail_life, 0.0, 1.0)
 		var op := 1.0 - (1.0 - f) * (1.0 - f)   # same ease-out as the draw
@@ -599,12 +623,14 @@ func ensure_asteroids() -> void:
 
 
 func spawn_threat() -> void:
-	# Difficulty tier rises each time the wave count grows (every full 4-spawn cycle, see
-	# enemy_count): each tier adds +1 HP and +0.5 core/s drain. Enemies spawn a full ring_gap
-	# beyond the outer ring so they fly in from off-screen rather than popping onto the ring.
-	var tier := threat_spawn_count / 4
+	# Difficulty rises on rounds 4, 7, 10, 13… — each bump raises ONE stat (HP first, then drain,
+	# alternating) and adds one more enemy (see enemy_count). Enemies spawn a full ring_gap beyond
+	# the outer ring so they fly in from off-screen rather than popping onto the ring.
+	var bumps := enemy_bumps(threat_spawn_count + 1)
+	var hp := threat_hp + (bumps + 1) / 2          # HP bumps land on rounds 4, 10, 16…
+	var drain := threat_drain + 0.5 * float(bumps / 2)  # drain bumps land on rounds 7, 13, 19…
 	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + ring_gap,
-		"hp": threat_hp + tier, "drain": threat_drain + 0.5 * tier, "latched": false, "cd": 0.0, "beep": 0.0 })
+		"hp": hp, "drain": drain, "latched": false, "cd": 0.0, "beep": 0.0 })
 
 
 # ── Sealing / progression ──────────────────────────────────
@@ -615,6 +641,7 @@ func try_seal() -> void:
 	if tail_span() < TAU:
 		return
 	sealed[current_ring] = true
+	min_speed += 100.0      # each seal raises the floor (50 → 150 → 250)
 	sealing = false         # cinematic done; tail despawn resumes
 	hitstop = seal_hitstop
 	shake = minf(2.5, shake + 1.4)
@@ -677,10 +704,12 @@ func _process(delta: float) -> void:
 	sync_light_areas()   # keep the collision pool tracking the live lights + moon head
 	space_cd = maxf(0.0, space_cd - delta)
 	powerdown = maxf(0.0, powerdown - delta)
+	slow_iframe = maxf(0.0, slow_iframe - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
 	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
 	banner_timer = maxf(0.0, banner_timer - delta)
+	hint_timer = maxf(0.0, hint_timer - delta)
 	shake = maxf(0.0, shake - delta * 5.0)
 	for p in particles:
 		p.pos += p.vel * delta
@@ -739,7 +768,7 @@ func _tick_play(sim: float) -> void:
 			var f := float(s) / float(nsub)
 			var aa := a0 + dlt * f
 			# `glide`: dropped mid-traversal (wrong radius) — excluded from the seal-wrap measure.
-			comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f, "glide": moving })
+			comet.append({ "pos": display_radius * Vector2(cos(aa), sin(aa)), "life": tail_life, "cum": (cum_angle - dlt) + dlt * f, "glide": moving, "ring": current_ring })
 	# Age particles. During a committed seal, FREEZE the oldest (anchor) and never pop it,
 	# so the moon is guaranteed to lap around and make contact (failsafe).
 	for i in range(comet.size()):
@@ -794,7 +823,7 @@ func _tick_play(sim: float) -> void:
 		light_timer -= sim
 		if light_timer <= 0.0:
 			for n in light_count:
-				if unlocked < 2:
+				if unlocked < 2 or sealed[current_ring]:   # free before the core exists, or on a sealed ring (no refill flicker)
 					spawning.append({ "angle": rand_ahead(), "t": 0.0, "charge": light_charge_time })   # free before the core exists (ring 1)
 				elif core > light_cost:                   # strict: never spend the last point
 					core -= light_cost
@@ -837,7 +866,9 @@ func _tick_play(sim: float) -> void:
 		if current_ring == 2:
 			for ast in asteroids:
 				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
-					speed = speed * ast_slow_miss()
+					if slow_iframe <= 0.0:                # global i-frame: one slow per second total
+						speed = speed * ast_slow_miss()
+						slow_iframe = 1.0
 					ast.cd = asteroid_hit_cd
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
@@ -848,9 +879,9 @@ func _tick_play(sim: float) -> void:
 	# actually reached the inner ring (a still-traveling enemy is fine). (Other sealed rings get
 	# reduced decay via cur_decay, but no replenish.) While below full, moon-motes get sucked into
 	# the core as pure visual fluff — fill is the rate.
-	if current_ring == 0 and not moving and not core_under_attack():
-		core = minf(core_cap, core + core_refill_rate * sim)
-		if core < core_cap:
+	if (current_ring == 0 or sealed[current_ring]) and not moving and not core_under_attack():
+		core = minf(core_max_eff(), core + core_refill_rate * sim)
+		if core < core_max_eff():
 			refill_emit -= sim
 			if refill_emit <= 0.0:
 				refill_emit = refill_emit_step
@@ -863,8 +894,9 @@ func _tick_play(sim: float) -> void:
 		if dead_reason == "":
 			dead_reason = "THE PLANET'S CORE DIED"
 
-	# Back at the hub, enemies cleared and the core topped back off -> open the upgrade screen.
-	if hub_pending and not shop_open and current_ring == 0 and not moving and threats.is_empty() and core >= core_cap:
+	# Back at the hub, no enemy ON the inner ring, and the core topped back off -> open the shop.
+	# (Enemies still flying inward no longer block it — only a latched one does.)
+	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack() and core >= core_cap:
 		hub_pending = false
 		open_upgrades()
 
@@ -886,12 +918,17 @@ func do_beam() -> void:
 		threats = threats.filter(func(t): return t.hp > 0)
 
 
-func enemy_interval(i: int) -> float:
-	return [40.0, 35.0, 30.0, 25.0][i % 4]
+func enemy_interval(_i: int) -> float:
+	return 30.0   # flat 30s between waves
+
+
+func enemy_bumps(rnd: int) -> int:
+	# How many difficulty bumps have occurred by 1-based round `rnd` (bumps on 4, 7, 10, 13…).
+	return ((rnd - 4) / 3 + 1) if rnd >= 4 else 0
 
 
 func enemy_count(i: int) -> int:
-	return i / 4 + 1   # +1 enemy each full 4-spawn cycle
+	return 1 + enemy_bumps(i + 1)   # +1 enemy per bump (i is the 0-based wave index)
 
 
 func core_under_attack() -> bool:
@@ -929,7 +966,9 @@ func _tick_threats(sim: float) -> void:
 		# pass sets t.cd, so killing/hitting it skips the slow. With Ramming, a missed-SPACE
 		# collision still slows but chips 1 HP off the enemy.
 		if t.cd <= 0.0 and moon_world().distance_to(ring_point(t.radius, t.angle)) < enemy_contact_dist:
-			speed = maxf(min_speed, speed * asteroid_hit_mult)
+			if slow_iframe <= 0.0:                # global i-frame: one slow per second total
+				speed = maxf(min_speed, speed * asteroid_hit_mult)
+				slow_iframe = 1.0
 			t.cd = asteroid_hit_cd
 			shake = minf(1.8, shake + 0.3)
 			var cp := ring_point(t.radius, t.angle)
@@ -1176,6 +1215,8 @@ func try_boost() -> bool:
 				asteroid_mats += 1
 				asteroid_respawn = asteroid_respawn_delay
 				popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
+				if has_asteroid_boost:                              # Comet premium: a kill grants ~1/3 of a light boost
+					speed = minf(max_speed, speed + boost_base / 3.0)
 		if hit_ast:
 			asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 	return did
@@ -1211,15 +1252,14 @@ func arrive_at_hub() -> void:
 # open it. If nothing's affordable it flashes "No upgrades available" instead and we stay in
 # play (shop_open stays false, so the game isn't frozen).
 func open_upgrades() -> void:
-	# Reveal the top-row sections one per visit: 1st = Stardust, 2nd = +Core, 3rd = +Light boost.
-	# The counter only advances on a visit that actually opens (something was buyable), so a
-	# "no upgrades" bounce doesn't burn a reveal step.
-	var reveal := mini(shop_visits + 1, 3)
-	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, reveal)
+	# All three top-row sections show at once now (reveal arg unused by the menu, pass 3). The
+	# bottom row still gates on ring 3.
+	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, 3)
 	if upgrade_menu.any_buyable():
-		shop_visits += 1
 		shop_open = true
-	upgrade_menu.open()
+		upgrade_menu.open()
+	else:
+		show_hint("NO UPGRADES AVAILABLE", 1.6)   # top-center hint instead of the menu's own banner
 
 
 # A purchase happened: pull the spent wallets back from the menu, then apply the effect.
@@ -1233,37 +1273,41 @@ func _on_upgrade_closed() -> void:
 	shop_open = false
 
 
-# Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. A couple of
-# tracks turn their final level into a special unlock (Vacuum at dust_spawn L3, Double lights at
-# boost_frequency L3). `core_refill_rate` sets the core's home-ring recharge speed (HP/s).
+func show_hint(text: String, dur: float) -> void:
+	hint_text = text
+	hint_timer = dur
+
+
+# Map a menu upgrade id + the level just bought (1-based) to its real in-game effect. Each section is
+# a main multi-level track plus a single-level "premium" unlock. Per-level magnitudes are tunable.
 func apply_upgrade(id: String, level: int) -> void:
 	match id:
-		"core_max":
-			core_cap = [5.0, 15.0, 35.0, 80.0][level]          # core max: base 5, 1→15, 2→35, 3→80 (2/5/14 stardust)
-		"core_refill":
-			core_refill_rate = [1.5, 5.0, 10.0, 20.0][level]   # core HP/s while orbiting home: base 1.5, 1→5, 2→10, 3→20
-		"boost_strength":
-			if level <= 2:
-				boost_base *= 2.0                              # ×2 speed per boost...
-				light_cost += 1.0                              # ...but +1 core per light (the tradeoff)
-			else:
-				has_material_boost = true                      # 3rd tier = "Stardust boost" (press B to spend Stardust)
-		"boost_frequency":
-			if level <= 2:
-				light_delay = [light_delay, 1.5, 1.0][level]   # old "Faster lights": 1.5s then 1.0s
-			else:
-				light_count = 2                                # 3rd tier = "Double lights"
-		"dust_capacity":
-			max_inventory = [3, 8, 15, 25][level]              # carry: base 3, 1→8, 2→15, 3→25 (1/5/10 stardust)
-		"dust_spawn":
+		# ── Stardust: more carry + faster spawns (L3 is capacity-only) ──
+		"dust_main":
+			max_inventory = [3, 8, 15, 25][level]              # carry: base 3 → 8 → 15 → 25
 			match level:
-				1: material_max += 1                           # +1 stardust on the ring
-				2: material_max += 2                           # +2 more (total +3 over the base)
-				3: has_vacuum = true                           # 3rd tier = "Vacuum"
-		"horns":           has_horns = true; hit_damage += 1
-		"ram":             has_ramming = true
-		"armor":           armor_level = level   # 1: half-slow on a SPACE hit · 2: no slow on a hit · 3: also softens a miss
-		"more_asteroids":  asteroid_max += 1
+				1: material_max += 1                           # L1/L2 also speed up spawns (+1, then +2)
+				2: material_max += 2
+		"dust_premium":   has_vacuum = true
+		# ── Core: more max + faster refill, every level ──
+		"core_main":
+			core_cap = [5.0, 15.0, 35.0, 80.0][level]          # base 5 → 15 → 35 → 80
+			core_refill_rate = [1.5, 5.0, 10.0, 20.0][level]   # base 1.5 → 5 → 10 → 20
+		"core_premium":   has_overfill = true                  # charge past full, up to 1.5×
+		# ── Light boost: ×2 speed + more frequent lights, every level ──
+		"boost_main":
+			boost_base *= 2.0                                  # ×2 speed per boost...
+			light_cost += 1.0                                  # ...at +1 core per light
+			light_delay = [2.0, 1.5, 1.0, 0.7][level]          # ...and faster respawns
+		"boost_premium":  light_count = 2
+		# ── Attack: +1 damage AND less asteroid slowdown (Armor), every level ──
+		"atk_main":
+			hit_damage = 1 + level                             # damage 2 / 3 / 4
+			armor_level = level                                # armor tier 1 / 2 / 3
+		"atk_premium":    has_ramming = true
+		# ── Comet: +1 asteroid per level ──
+		"comet_main":     asteroid_max += 1
+		"comet_premium":  has_asteroid_boost = true
 
 
 func buy(node: Dictionary) -> void:
@@ -1350,27 +1394,22 @@ func _draw() -> void:
 		var gc := style.light_idle
 		gc.a = energy * 0.55 * (1.0 - lt) * (1.0 - lt)   # strong emission only when energized
 		draw_circle(core_c, pr * (1.0 + 1.4 * lt), gc)
-	draw_circle(core_c, pr, style.planet_sick.lerp(style.light_idle, energy))   # dead = dark purple (matches the menu)
+	var core_col := style.planet_sick.lerp(style.light_idle, energy)   # dead = dark purple (matches the menu)
+	if has_overfill and core > core_cap:                              # overfilled: lerp toward bright white (full at 1.5×)
+		var over := clampf((core - core_cap) / maxf(1.0, core_cap * 0.5), 0.0, 1.0)
+		core_col = core_col.lerp(Color(1, 1, 1, core_col.a), over)
+	draw_circle(core_c, pr, core_col)
 	# Core readout only matters once ring 2 is unlocked — before that you can't lose core, so hide it.
 	if unlocked >= 2:
 		var ht_size := int(round(26.0 * ui_text_scale))
 		var ht_voff := (font.get_ascent(ht_size) - font.get_descent(ht_size)) * 0.5   # baseline → vertical center
 		var ht_pos := c + Vector2(-100.0, ht_voff)
-		var ht_str := "%d/%d" % [clampi(ceili(core), 0, int(core_cap)), int(core_cap)]
+		var ht_str := "%d/%d" % [clampi(ceili(core), 0, int(core_max_eff())), int(core_cap)]   # overfill shows e.g. 50/35
 		# Dark outline so the readout stays legible on the vibrant yellow core (and the dark dead core).
 		draw_string_outline(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, maxi(2, int(ht_size * 0.1)), Color(0.1, 0.07, 0.02, 0.9))
 		draw_string(font, ht_pos, ht_str, HORIZONTAL_ALIGNMENT_CENTER, 200, ht_size, style.core_text)
 
-	# Shop is gated while waiting at the hub: clear enemies first, then let the core top off.
-	if hub_pending and not shop_open and current_ring == 0:
-		var gate_msg := ""
-		if not threats.is_empty():
-			gate_msg = "KILL ENEMIES TO OPEN THE SHOP"
-		elif core < core_cap:
-			gate_msg = "REFILL CORE TO OPEN SHOP"
-		if gate_msg != "":
-			dtext(font, c + Vector2(-450, -planet_draw_radius() * z - 40.0), gate_msg,
-				HORIZONTAL_ALIGNMENT_CENTER, 900, 26, style.shop_blocked)
+	# (Shop-gate hints now render in the shared top-center slot — see _draw_hud.)
 
 	# Blaster beam.
 	if beam_on:
@@ -1701,6 +1740,15 @@ func dtext(f: Font, pos: Vector2, text: String, align: int, width: float, size: 
 	draw_string(f, pos, text, align, width, int(round(float(size) * ui_text_scale)), color)
 
 
+# Status text in the shared top-center slot — same position/size/style as the ring-nav hint, so all
+# the transient messages (shop gate, RING SEALED, CORE LOW, no-upgrades) read as one consistent line.
+func draw_top_hint(f: Font, text: String, col: Color) -> void:
+	var hfs := int(round(22.0 * ui_text_scale))
+	var asc := f.get_ascent(hfs)
+	var sc := screen_center()
+	draw_string(f, Vector2(sc.x - 500.0, 24.0 + asc), text, HORIZONTAL_ALIGNMENT_CENTER, 1000.0, hfs, col)
+
+
 # Draw a square icon centered at `center`, side `sz`, rotated `rot` radians (PI = flipped).
 func draw_icon(tex: Texture2D, center: Vector2, sz: float, rot: float) -> void:
 	draw_set_transform(center, rot, Vector2.ONE)
@@ -1710,6 +1758,8 @@ func draw_icon(tex: Texture2D, center: Vector2, sz: float, rot: float) -> void:
 
 func _draw_hud(font: Font) -> void:
 	var vp := get_viewport_rect().size
+	# Dev readout (bottom-left): live speed + elapsed game time.
+	dtext(font, Vector2(22, vp.y - 26), "SPD %d   TIME %.1f" % [int(speed), game_time], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, style.hud_text)
 	# Resource readouts appear only once they matter: star dust at ring 2, star core at ring 3.
 	var res := ""
 	if unlocked >= 2:
@@ -1723,10 +1773,7 @@ func _draw_hud(font: Font) -> void:
 		var sw := font.get_string_size("STARDUST %d/%d" % [inventory, max_inventory], HORIZONTAL_ALIGNMENT_LEFT, -1, ss).x
 		var pulse := 0.85 + 0.15 * sin(game_time * 3.0)
 		draw_point_glow(Vector2(22 + sw + ss * 0.5, 56 - ss * 0.34), ss * 0.26 * pulse, style.square_ready)
-	# Core too low to make lights: head home to refill (it won't kill you, just dries up).
-	if phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
-		dtext(font, Vector2(22, 104), "CORE LOW — RETURN HOME TO REFILL",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 17, style.hud_warn)
+	# (CORE LOW warning now renders in the shared top-center slot — see the banner block below.)
 
 	# Clickable pause button (top-right). Pause bars while playing; play triangle while paused.
 	if phase == "play" and started and not shop_open and not confirm_reset:
@@ -1750,8 +1797,6 @@ func _draw_hud(font: Font) -> void:
 		dtext(font, sc + Vector2(-500, -180), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_win)
 	elif phase == "dead":
 		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_lose)
-	elif banner_timer > 0.0:
-		dtext(font, sc + Vector2(-500, -180), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_info)
 
 	# One-time ring-nav hint — "PRESS [↓] AND [↑]" with the arrow icons standing in for the
 	# words. Laid out by hand (text + icon + text + icon + text) and centered along the top.
@@ -1778,6 +1823,27 @@ func _draw_hud(font: Font) -> void:
 		draw_icon(arrow_tex, Vector2(hx + isz * 0.5, hmid), isz, 0.0)   # then UP
 		hx += isz
 		draw_string(font, Vector2(hx, hbase), p_end, HORIZONTAL_ALIGNMENT_LEFT, -1, hfs, hcol)
+
+	# All other transient status text shares that same top-center slot (only when the nav-hint isn't
+	# up). Priority: shop-gate > RING SEALED banner > CORE LOW > generic hint (e.g. NO UPGRADES).
+	if not nav_hint_show:
+		var top_msg := ""
+		var top_col: Color = style.banner_info
+		if hub_pending and not shop_open and current_ring == 0 and core_under_attack():
+			top_msg = "KILL ENEMIES TO OPEN THE SHOP"
+			top_col = style.shop_blocked
+		elif hub_pending and not shop_open and current_ring == 0 and core < core_cap:
+			top_msg = "REFILL CORE TO OPEN SHOP"
+			top_col = style.shop_blocked
+		elif phase == "play" and banner_timer > 0.0:
+			top_msg = banner_text
+		elif phase == "play" and unlocked >= 2 and lights.is_empty() and core <= light_cost:
+			top_msg = "CORE LOW — RETURN HOME TO REFILL"
+			top_col = style.hud_warn
+		elif hint_timer > 0.0:
+			top_msg = hint_text
+		if top_msg != "":
+			draw_top_hint(font, top_msg, top_col)
 
 	# (The upgrade screen draws itself — it's the UpgradeMenu scene on its own CanvasLayer.)
 	if confirm_reset:
