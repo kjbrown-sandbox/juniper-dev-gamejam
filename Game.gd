@@ -36,7 +36,6 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var traverse_cost := 150.0
 @export var view_margin := 0.80
 @export var max_zoom := 2.2             # cap on zoom-in (lets the small inner ring fill the view)
-@export var enemy_zoom_time := 1.0      # brief zoom-out to the furthest ring when an enemy wave spawns
 @export var core_low_frac := 0.3        # core HP fraction at/below which the low-core vignette kicks in
 
 # ── Tail / speed ───────────────────────────────────────────
@@ -139,7 +138,6 @@ var banner_timer := 0.0
 var hint_text := ""        # transient top-center status hint (e.g. "NO UPGRADES AVAILABLE")
 var hint_timer := 0.0
 var hint_col := Color(1, 1, 1, 1)   # color for the current hint_text
-var enemy_zoom := 0.0      # seconds left of the spawn-time zoom-out to the furthest unlocked ring
 var angle := 0.0
 var speed := 0.0
 var combo := 0
@@ -374,7 +372,6 @@ func reset() -> void:
 	banner_timer = 0.0
 	hint_text = ""
 	hint_timer = 0.0
-	enemy_zoom = 0.0
 	core = core_start
 	core_lit = 0.0
 	inventory = 0
@@ -628,12 +625,12 @@ func ensure_asteroids() -> void:
 
 
 func spawn_threat() -> void:
-	# Difficulty rises on rounds 4, 7, 10, 13… — each bump raises ONE stat (HP first, then drain,
-	# alternating) and adds one more enemy (see enemy_count). Enemies spawn a full ring_gap beyond
-	# the outer ring so they fly in from off-screen rather than popping onto the ring.
+	# Difficulty rises on rounds 4, 7, 10, 13… — each bump adds one more enemy AND raises drain;
+	# HP goes up every OTHER bump (rounds 4, 10, 16…). Enemies spawn a full ring_gap beyond the
+	# outer ring so they fly in from off-screen rather than popping onto the ring.
 	var bumps := enemy_bumps(threat_spawn_count + 1)
 	var hp := threat_hp + (bumps + 1) / 2          # HP bumps land on rounds 4, 10, 16…
-	var drain := threat_drain + 0.5 * float(bumps / 2)  # drain bumps land on rounds 7, 13, 19…
+	var drain := threat_drain + 0.5 * float(bumps)  # drain rises every bump (with the enemy count)
 	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + ring_gap,
 		"hp": hp, "drain": drain, "latched": false, "cd": 0.0, "beep": 0.0 })
 
@@ -712,11 +709,7 @@ func _process(delta: float) -> void:
 	slow_iframe = maxf(0.0, slow_iframe - delta)
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
-	enemy_zoom = maxf(0.0, enemy_zoom - delta)
-	var scale_target := desired_scale()
-	if enemy_zoom > 0.0:   # zoom out to frame the furthest unlocked ring while a wave arrives
-		scale_target = minf(scale_target, frame_scale(ring_r(unlocked - 1)))
-	view_scale = lerpf(view_scale, scale_target, clampf(3.0 * delta, 0.0, 1.0))
+	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
 	banner_timer = maxf(0.0, banner_timer - delta)
 	hint_timer = maxf(0.0, hint_timer - delta)
 	shake = maxf(0.0, shake - delta * 5.0)
@@ -928,7 +921,7 @@ func do_beam() -> void:
 
 
 func enemy_interval(_i: int) -> float:
-	return 30.0   # flat 30s between waves
+	return 25.0   # flat 25s between waves
 
 
 func enemy_bumps(rnd: int) -> int:
@@ -955,8 +948,7 @@ func _tick_threats(sim: float) -> void:
 				spawn_threat()
 			threat_spawn_count += 1
 			threat_timer = enemy_interval(threat_spawn_count)
-			enemy_zoom = enemy_zoom_time   # pull the camera out to the outer ring for a beat...
-			show_hint("ENEMIES APPROACHING", maxf(enemy_zoom_time, 1.6), style.core_text)   # ...and warn
+			show_hint("ENEMIES APPROACHING", 1.6, style.core_text)
 
 	for t in threats:
 		if t.cd > 0.0:
