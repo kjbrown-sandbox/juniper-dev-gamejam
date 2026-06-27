@@ -21,6 +21,7 @@ signal no_upgrades                                         # open() refused: not
 @export var stardust := 8          # stardust wallet (top row)
 @export var stardust_max := 12     # carry cap (shown as "Stardust: x/y")
 @export var comets := 6            # comet wallet (bottom row: Attack / Comet)
+@export var finale := false        # show the Finale section (set once the outer ring is sealed)
 @export var auto_open_for_preview := true   # run the scene on its own and it opens itself
 @export var buy_arm_delay := 0.25  # ignore SPACE for this long after opening (stray boosts)
 
@@ -101,7 +102,7 @@ func default_sections() -> Array:
 			  "sd": [8], "cm": [1], "premium": true },
 		] },
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
-			{ "id": "atk_main", "name": "Basic", "desc": "+1 damage, less asteroid slowdown",
+			{ "id": "atk_main", "name": "Basic", "desc": "+1 damage, comets slow less",
 			  "sd": [0, 0, 0], "cm": [1, 4, 9] },
 			{ "id": "atk_premium", "name": "Ram", "desc": "Deal damage even on miss",
 			  "sd": [10], "cm": [2], "premium": true },
@@ -111,6 +112,13 @@ func default_sections() -> Array:
 			  "sd": [0, 0, 0], "cm": [1, 4, 9] },
 			{ "id": "comet_premium", "name": "Comet boost", "desc": "Comets grant a speed boost",
 			  "sd": [10], "cm": [1], "premium": true },
+		] },
+		# Finale: appears once the outer ring is sealed (gated by `finale`); bottom-right slot.
+		{ "id": "finale", "title": "Finale", "row": 1, "upgrades": [
+			{ "id": "finale_main", "name": "Infinity", "desc": "Remove the Stardust cap",
+			  "sd": [0], "cm": [10] },
+			{ "id": "finale_premium", "name": "Freedom?", "desc": "???",
+			  "sd": [100], "cm": [20], "premium": true },
 		] },
 	]
 
@@ -151,6 +159,8 @@ func can_buy(si: int, ui: int) -> bool:
 # All three top-row sections (Stardust/Core/Light boost) show at once now. The bottom row
 # (Attack/Comet) still appears only once the asteroid ring is unlocked.
 func _section_visible(si: int) -> bool:
+	if String(sections[si].get("id", "")) == "finale":
+		return finale   # only after the outer ring is sealed
 	if int(sections[si].row) == 0:
 		return true
 	return unlocked >= 3
@@ -167,12 +177,13 @@ func any_buyable() -> bool:
 
 
 # ── Public API (host calls these) ──────────────────────────────────────────
-func configure(p_unlocked: int, p_stardust: int, p_stardust_max: int, p_comets: int, p_reveal: int) -> void:
+func configure(p_unlocked: int, p_stardust: int, p_stardust_max: int, p_comets: int, p_reveal: int, p_finale: bool = false) -> void:
 	unlocked = p_unlocked
 	stardust = p_stardust
 	stardust_max = p_stardust_max
 	comets = p_comets
 	reveal = p_reveal
+	finale = p_finale
 
 
 # Opens the menu — UNLESS nothing is buyable, in which case it stays closed and flashes

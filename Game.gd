@@ -32,6 +32,7 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var planet_radius := 40.0
 @export var planet_grow_step := 14.0    # planet heals a step per ring sealed
 @export var moon_radius := 10.0    # matches the boost-light point size (the moon is a cyan one)
+@export var moon_screen_size := 18.0   # the moon's drawn radius in SCREEN px — constant at any zoom
 @export var traverse_time := 2.0
 @export var traverse_cost := 150.0
 @export var view_margin := 0.80
@@ -113,6 +114,7 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var enemy_hit_dist := 70.0      # base SPACE reach for enemies (scaled by reach_mult())
 @export var enemy_contact_dist := 34.0  # proximity at which a passed enemy slows you (item 9)
 @export var threat_speed := 90.0
+@export var enemy_first_delay := 5.0    # first wave spawns this long after the second ring unlocks
 @export var threat_hp := 1            # base enemy HP (wave 0); +1 per difficulty tier
 @export var threat_drain := 0.3       # base core/s an enemy drains (wave 0); +0.5 per difficulty tier
 @export var ram_radial_tol := 45.0
@@ -128,8 +130,30 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var grid_glow_radius := 240.0   # screen px: grid lines within this of the moon brighten
 @export var grid_glow_strength := 0.8   # extra alpha added to grid lines right under the moon
 
+# ── Finale cinematic (the "Freedom?" ending) ───────────────
+@export var fin_glide_time := 1.0       # per-ring glide during the escape
+@export var fin_collapse_time := 3.0    # how long the rings/core take to shrink away
+@export var fin_finale_speed := 900.0   # speed the moon is set to for the escape (regardless of prior speed)
+@export var fin_escape_rate := 700.0    # px/s the moon drifts outward while leaving
+
+# ── Debug ──────────────────────────────────────────────────
+@export var debug_start := false         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
+
 # ── State ──────────────────────────────────────────────────
-var phase := "play"      # play | dead | won
+var phase := "play"      # play | dead | won | finale (the escape cinematic)
+var finale_unlocked := false   # 3rd ring sealed -> the Finale shop section appears
+var has_stardust_uncap := false # "Hoard" bought -> no carry cap
+var pending_finale := false     # "Freedom?" bought -> start the cinematic when the shop closes
+var finale_won := false         # the win came via the Finale (changes the end card)
+var fin_stage := 0              # cinematic stage: 0,1 = glide out; 2 = leave+collapse; 3 = done
+var fin_t := 0.0                # timer within the current cinematic stage
+var finale_scale := 1.0         # draw-only multiplier shrinking the rings/core during the collapse
+var finale_time := 0.0          # run length captured at the escape (for the victory screen)
+var finale_hit: Array = []      # clickable victory-screen buttons: { rect, action }
+# Run totals for the victory screen (cumulative, not the spendable wallets).
+var total_stardust := 0
+var total_comets := 0
+var total_enemies := 0
 var started := false     # the moon waits at the top until the first SPACE (launch)
 var dead_reason := ""
 var top_angle := -PI / 2.0
@@ -372,6 +396,18 @@ func reset() -> void:
 	banner_timer = 0.0
 	hint_text = ""
 	hint_timer = 0.0
+	finale_unlocked = false
+	has_stardust_uncap = false
+	pending_finale = false
+	finale_won = false
+	fin_stage = 0
+	fin_t = 0.0
+	finale_scale = 1.0
+	finale_time = 0.0
+	finale_hit.clear()
+	total_stardust = 0
+	total_comets = 0
+	total_enemies = 0
 	core = core_start
 	core_lit = 0.0
 	inventory = 0
@@ -451,8 +487,35 @@ func reset() -> void:
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
 	game_time = 0.0
+	if debug_start:
+		debug_setup()
 	view_scale = desired_scale()
 	queue_redraw()
+
+
+# TESTING ONLY (gated by debug_start): jump straight to two rings sealed with the whole upgrade tree
+# owned, so the late game / Finale can be reached fast. Runs at the tail of reset(), after the base
+# values + menu levels have been cleared.
+func debug_setup() -> void:
+	sealed = [true, true, false]
+	unlocked = 3
+	min_speed = _base.min_speed + 200.0   # +100 per (pretend) seal
+	enemy_active = true
+	threat_spawn_count = 0
+	threat_timer = enemy_first_delay
+	inventory = 50
+	asteroid_mats = 50
+	# Own every non-Finale upgrade: apply each level's effect and mark the menu card maxed.
+	for s in upgrade_menu.sections:
+		if String(s.get("id", "")) == "finale":
+			continue
+		for u in s.upgrades:
+			var maxlv: int = u.sd.size()
+			for lv in range(1, maxlv + 1):
+				apply_upgrade(u.id, lv)
+			u.level = maxlv
+	refill_materials()   # after the upgrades so they use the boosted counts
+	ensure_asteroids()
 
 
 # ── Geometry / view ────────────────────────────────────────
@@ -625,12 +688,12 @@ func ensure_asteroids() -> void:
 
 
 func spawn_threat() -> void:
-	# Difficulty rises on rounds 4, 7, 10, 13… — each bump adds one more enemy AND raises drain;
-	# HP goes up every OTHER bump (rounds 4, 10, 16…). Enemies spawn a full ring_gap beyond the
-	# outer ring so they fly in from off-screen rather than popping onto the ring.
+	# Difficulty rises on rounds 4, 7, 10, 13… — each bump adds one more enemy AND raises both HP
+	# and drain. Enemies spawn a full ring_gap beyond the outer ring so they fly in from off-screen
+	# rather than popping onto the ring.
 	var bumps := enemy_bumps(threat_spawn_count + 1)
-	var hp := threat_hp + (bumps + 1) / 2          # HP bumps land on rounds 4, 10, 16…
-	var drain := threat_drain + 0.5 * float(bumps)  # drain rises every bump (with the enemy count)
+	var hp := threat_hp + bumps                     # +1 HP every bump
+	var drain := threat_drain + 0.5 * float(bumps)  # +0.5 drain every bump
 	threats.append({ "angle": randf_range(-PI, PI), "radius": ring_r(unlocked - 1) + ring_gap,
 		"hp": hp, "drain": drain, "latched": false, "cd": 0.0, "beep": 0.0 })
 
@@ -652,7 +715,11 @@ func try_seal() -> void:
 		particles.append({ "pos": mp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(160.0, 420.0), "life": randf_range(0.3, 0.7) })
 	flashes.append({ "pos": Vector2.ZERO, "life": 0.6 })
 	if current_ring == 2:
-		phase = "won"
+		# The last ring is sealed — no instant win anymore. It unlocks the Finale shop section; the
+		# real ending comes from buying "Freedom?". No ring 4 to open, so don't bump unlocked.
+		finale_unlocked = true
+		banner_text = "FINAL RING SEALED — FINAL UPGRADES"
+		banner_timer = 3.0
 		return
 	unlocked = sealed_count() + 1
 	# Extra burst of light: the moon broke free of this ring's orbit.
@@ -669,7 +736,10 @@ func try_seal() -> void:
 	banner_text = "RING SEALED — RING %d OPEN" % unlocked
 	banner_timer = 2.5
 	if unlocked == 2:
-		refill_materials()   # ring 2 opens with squares ready to grab
+		refill_materials()              # ring 2 opens with squares ready to grab
+		enemy_active = true             # enemies begin once the second ring is unlocked...
+		threat_spawn_count = 0
+		threat_timer = enemy_first_delay   # ...first wave 5s later, then every enemy_interval (20s)
 	if unlocked == 3:
 		ensure_asteroids()
 
@@ -677,6 +747,11 @@ func try_seal() -> void:
 # ── Sim ────────────────────────────────────────────────────
 func _process(delta: float) -> void:
 	if phase == "won" or phase == "dead":
+		queue_redraw()
+		return
+	if phase == "finale":
+		_tick_finale(delta)   # view_scale stays frozen (no lerp here)
+		_tick_fx(delta)       # ...but particles/flashes/shake keep animating so it isn't frozen
 		queue_redraw()
 		return
 	if paused or shop_open or confirm_reset:
@@ -710,6 +785,13 @@ func _process(delta: float) -> void:
 	cam_focus = Vector2.ZERO
 	cam_zoom = 1.0
 	view_scale = lerpf(view_scale, desired_scale(), clampf(3.0 * delta, 0.0, 1.0))
+	_tick_fx(delta)
+	queue_redraw()
+
+
+# Animate the transient effects (particles, popups, flashes, shake, banner timers). Runs every frame
+# in play AND during the finale cinematic, so the scene never freezes.
+func _tick_fx(delta: float) -> void:
 	banner_timer = maxf(0.0, banner_timer - delta)
 	hint_timer = maxf(0.0, hint_timer - delta)
 	shake = maxf(0.0, shake - delta * 5.0)
@@ -725,8 +807,6 @@ func _process(delta: float) -> void:
 	for fl in flashes:
 		fl.life -= delta
 	flashes = flashes.filter(func(fl): return fl.life > 0.0)
-
-	queue_redraw()
 
 
 func _tick_play(sim: float) -> void:
@@ -868,7 +948,19 @@ func _tick_play(sim: float) -> void:
 		if current_ring == 2:
 			for ast in asteroids:
 				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
-					if slow_iframe <= 0.0:                # global i-frame: one slow per second total
+					if has_ramming:
+						# Ram vacuums asteroids: shatter on contact and collect the comet, no slowdown.
+						ast.hits_left = 0
+						var ap := ring_point(ring_r(2), ast.angle)
+						asteroid_mats += 1
+						total_comets += 1
+						asteroid_respawn = asteroid_respawn_delay
+						popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
+						for n in 6:
+							particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
+						if has_asteroid_boost:
+							speed = minf(max_speed, speed + boost_base / 3.0)
+					elif slow_iframe <= 0.0:              # global i-frame: one slow per second total
 						speed = speed * ast_slow_miss()
 						slow_iframe = 1.0
 					ast.cd = asteroid_hit_cd
@@ -917,11 +1009,11 @@ func do_beam() -> void:
 				particles.append({ "pos": tp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 260.0), "life": randf_range(0.2, 0.5) })
 	if killed:
 		shake = minf(2.0, shake + 0.5)   # punch the screen when the beam vaporizes an enemy
-		threats = threats.filter(func(t): return t.hp > 0)
+		cull_threats()
 
 
 func enemy_interval(_i: int) -> float:
-	return 25.0   # flat 25s between waves
+	return 20.0   # flat 20s between waves
 
 
 func enemy_bumps(rnd: int) -> int:
@@ -936,6 +1028,13 @@ func enemy_count(i: int) -> int:
 func core_under_attack() -> bool:
 	# True while any enemy has reached (latched onto) the innermost ring.
 	return threats.any(func(t): return t.latched)
+
+
+# Drop dead enemies (hp <= 0) and tally the kills for the victory screen.
+func cull_threats() -> void:
+	var before := threats.size()
+	threats = threats.filter(func(t): return t.hp > 0)
+	total_enemies += before - threats.size()
 
 
 func _tick_threats(sim: float) -> void:
@@ -979,7 +1078,7 @@ func _tick_threats(sim: float) -> void:
 				particles.append({ "pos": cp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
 			if has_ramming:
 				t.hp -= 1
-	threats = threats.filter(func(t): return t.hp > 0)
+	cull_threats()
 
 	core = maxf(0.0, core)   # core can run dry (lights stop spawning), but it's not an instant loss
 
@@ -992,6 +1091,8 @@ func _trail() -> void:
 
 # ── Input ──────────────────────────────────────────────────
 func _unhandled_key_input(event: InputEvent) -> void:
+	if phase == "finale":
+		return   # controls are locked out during the escape cinematic
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 	var k := (event as InputEventKey).keycode
@@ -1019,9 +1120,6 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					started = true        # launch: kick off + the boost below
 					speed = start_speed
 					core = core_cap                 # the core is online from the first second
-					enemy_active = true             # and enemies start attacking immediately
-					threat_spawn_count = 0
-					threat_timer = enemy_interval(0)
 					if not music.playing:
 						music.play()    # background music starts on the very first launch, then loops
 					# Flare the core to life: an expanding yellow light ring + a burst from the core.
@@ -1069,9 +1167,22 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if phase == "finale":
+		return   # controls are locked out during the escape cinematic
 	if not (event is InputEventMouseButton and event.pressed and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT):
 		return
 	var mp := (event as InputEventMouseButton).position
+
+	# Victory screen — Play again / Main menu buttons.
+	if phase == "won" and finale_won:
+		for h in finale_hit:
+			if (h.rect as Rect2).has_point(mp):
+				if h.action == "again":
+					reset()
+				elif h.action == "menu":
+					get_tree().change_scene_to_file("res://MainMenu.tscn")
+				return
+		return
 
 	# "Are you sure?" overlay — Yes / No buttons.
 	if confirm_reset:
@@ -1119,6 +1230,7 @@ func collect_square(i: int) -> void:
 	var ma: float = materials[i].angle
 	materials.remove_at(i)
 	inventory = mini(max_inventory, inventory + overflow_mult)   # Bigger squares = +N wallet per grab
+	total_stardust += overflow_mult   # lifetime tally for the victory screen
 	spawn_square()   # replacement appears immediately (not grabbable until it fades in)
 	var mp := ring_point(ring_r(1), ma)
 	flashes.append({ "pos": mp, "life": 0.3 })
@@ -1191,7 +1303,7 @@ func try_boost() -> bool:
 		if midair:
 			popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL BONUS", "life": 0.9, "size": 18 })
 	if hit_enemy:
-		threats = threats.filter(func(t): return t.hp > 0)
+		cull_threats()
 
 	# Asteroids — normal hit needs you on ring 2 within tol; the shockwave reaches any in blast range.
 	if unlocked >= 3:
@@ -1216,6 +1328,7 @@ func try_boost() -> bool:
 				particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
 			if ast.hits_left <= 0:
 				asteroid_mats += 1
+				total_comets += 1
 				asteroid_respawn = asteroid_respawn_delay
 				popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
 				if has_asteroid_boost:                              # Comet premium: a kill grants ~1/3 of a light boost
@@ -1257,7 +1370,7 @@ func arrive_at_hub() -> void:
 func open_upgrades() -> void:
 	# All three top-row sections show at once now (reveal arg unused by the menu, pass 3). The
 	# bottom row still gates on ring 3.
-	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, 3)
+	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, 3, finale_unlocked)
 	if upgrade_menu.any_buyable():
 		shop_open = true
 		upgrade_menu.open()
@@ -1274,6 +1387,61 @@ func _on_upgrade_purchased(section_id: String, upgrade_id: String, level: int) -
 
 func _on_upgrade_closed() -> void:
 	shop_open = false
+	if pending_finale:
+		start_finale()
+
+
+# Kick off the escape cinematic: lock the player out, set the speed floor, freeze the camera on the
+# outer ring, and clear the field so only the moon + rings + core remain to play out the ending.
+func start_finale() -> void:
+	pending_finale = false
+	phase = "finale"
+	finale_time = game_time   # the run's completion time (game_time is frozen during the cinematic)
+	fin_stage = 0
+	fin_t = 0.0
+	finale_scale = 1.0
+	moving = false
+	speed = fin_finale_speed   # always end at this speed, whatever the player was doing
+	view_scale = frame_scale(ring_r(2))   # frozen framing (the finale branch returns before the lerp)
+	lights.clear()
+	spawning.clear()
+	threats.clear()
+	asteroids.clear()
+	materials.clear()
+	comet.clear()
+
+
+# The cinematic state machine (runs in place of _tick_play while phase == "finale").
+func _tick_finale(delta: float) -> void:
+	angle = wrapf(angle + (speed / maxf(1.0, display_radius)) * delta, -PI, PI)   # keep orbiting
+	# Trail the escape: drop a tail point each frame (ring tag irrelevant — draw uses pos directly).
+	comet.append({ "pos": display_radius * Vector2(cos(angle), sin(angle)), "life": tail_life, "cum": 0.0, "glide": true, "ring": -1 })
+	for cp in comet:
+		cp.life -= delta
+	while not comet.is_empty() and comet[0].life <= 0.0:
+		comet.pop_front()
+	fin_t += delta
+	match fin_stage:
+		0:   # glide out to the middle ring
+			var u := clampf(fin_t / maxf(0.01, fin_glide_time), 0.0, 1.0)
+			display_radius = lerpf(ring_r(0), ring_r(1), u)
+			if u >= 1.0:
+				fin_stage = 1
+				fin_t = 0.0
+		1:   # immediately glide out to the outer ring (no pause on the middle)
+			var u := clampf(fin_t / maxf(0.01, fin_glide_time), 0.0, 1.0)
+			display_radius = lerpf(ring_r(1), ring_r(2), u)
+			if u >= 1.0:
+				fin_stage = 2
+				fin_t = 0.0
+		2:   # leave space: drift outward while the rings/core shrink into the center
+			display_radius += fin_escape_rate * delta
+			finale_scale = clampf(1.0 - fin_t / maxf(0.01, fin_collapse_time), 0.0, 1.0)
+			if fin_t >= fin_collapse_time:
+				fin_stage = 3
+		3:   # done — the true ending
+			phase = "won"
+			finale_won = true
 
 
 func show_hint(text: String, dur: float, col: Color) -> void:
@@ -1312,6 +1480,9 @@ func apply_upgrade(id: String, level: int) -> void:
 		# ── Comet: +1 asteroid per level ──
 		"comet_main":     asteroid_max += 1
 		"comet_premium":  has_asteroid_boost = true
+		# ── Finale ──
+		"finale_main":    has_stardust_uncap = true; max_inventory = 99999   # remove the carry cap
+		"finale_premium": pending_finale = true                              # "Freedom?" -> cinematic on shop close
 
 
 func buy(node: Dictionary) -> void:
@@ -1371,9 +1542,9 @@ func _draw() -> void:
 		if sealed[i]:
 			col = style.ring_sealed
 		if sealed[i]:
-			draw_glow_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_sealed)
+			draw_glow_arc(c, ring_r(i) * z * finale_scale, 0.0, TAU, 96, col, style.ring_w_sealed)
 		else:
-			draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_locked)
+			draw_arc(c, ring_r(i) * z * finale_scale, 0.0, TAU, 96, col, style.ring_w_locked)
 
 	# The comet tail: cyan particles the moon drops as it flies; they linger and fade.
 	for cp in comet:
@@ -1389,7 +1560,7 @@ func _draw() -> void:
 	# Core — a filled disc (no outline) whose color + emission ramp from the dead-core purple
 	# (low) up to the light's yellow (full), so it brightens/darkens with health. At launch it
 	# flares from dead → full (core_lit) so the menu's dead core comes alive instead of popping.
-	var pr := planet_draw_radius() * z
+	var pr := planet_draw_radius() * z * finale_scale   # shrinks to nothing during the finale collapse
 	# While charging a light, the core wobbles + dips a touch so the eye links drain → birth.
 	var core_c := c + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * core_charge * 4.0 * z
 	var energy := clampf(core / maxf(1.0, core_cap), 0.0, 1.0) * core_lit * (1.0 - 0.25 * core_charge)   # full health = bright yellow + emission
@@ -1404,7 +1575,8 @@ func _draw() -> void:
 		core_col = core_col.lerp(Color(1, 1, 1, core_col.a), over)
 	draw_circle(core_c, pr, core_col)
 	# Core readout only matters once ring 2 is unlocked — before that you can't lose core, so hide it.
-	if unlocked >= 2:
+	# Also hidden through the finale cinematic and the victory screen (no UI there).
+	if unlocked >= 2 and phase != "finale" and not finale_won:
 		var ht_size := int(round(26.0 * ui_text_scale))
 		var ht_voff := (font.get_ascent(ht_size) - font.get_descent(ht_size)) * 0.5   # baseline → vertical center
 		var ht_pos := c + Vector2(-100.0, ht_voff)
@@ -1517,11 +1689,11 @@ func _draw() -> void:
 		emit = 0.0 if el < powerdown_dark else clampf((el - powerdown_dark) / maxf(0.01, powerdown_time - powerdown_dark), 0.0, 1.0)
 	var dim := moon_col
 	dim.a = 0.35   # a faint core dot so the moon never fully vanishes while powered down
-	draw_circle(moon_pos, moon_radius * 0.6 * z, dim)
+	draw_circle(moon_pos, moon_screen_size * 0.6, dim)   # constant screen size (not zoom-scaled)
 	if emit > 0.0:
 		var glow_col := moon_col
 		glow_col.a = moon_col.a * emit
-		draw_point_glow(moon_pos, (moon_radius + 1.5 * mpulse) * z, glow_col)
+		draw_point_glow(moon_pos, moon_screen_size + 1.5 * mpulse, glow_col)
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
@@ -1534,7 +1706,10 @@ func _draw() -> void:
 		if vig > 0.0:
 			_draw_vignette(get_viewport_rect().size, vig)
 
-	_draw_hud(font)
+	if phase == "won" and finale_won:
+		_draw_finale_end(font)        # the true-ending victory screen (no game UI)
+	elif phase != "finale":           # UI is disabled during the escape cinematic
+		_draw_hud(font)
 
 
 # ── Reskin render helpers ──────────────────────────────────
@@ -1787,14 +1962,15 @@ func _draw_hud(font: Font) -> void:
 	# Resource readouts appear only once they matter: star dust at ring 2, star core at ring 3.
 	var res := ""
 	if unlocked >= 2:
-		res = "STARDUST %d/%d" % [inventory, max_inventory]
+		res = "STARDUST %d" % inventory if has_stardust_uncap else "STARDUST %d/%d" % [inventory, max_inventory]
 	if unlocked >= 3:
 		res += "      COMETS %d" % asteroid_mats
 	if res != "":
 		dtext(font, Vector2(22, 56), res, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, style.hud_text)
 		# Floating stardust glow after the STARDUST count, matching the dot on the upgrade screen.
 		var ss := int(round(18.0 * ui_text_scale))
-		var sw := font.get_string_size("STARDUST %d/%d" % [inventory, max_inventory], HORIZONTAL_ALIGNMENT_LEFT, -1, ss).x
+		var sd_str := "STARDUST %d" % inventory if has_stardust_uncap else "STARDUST %d/%d" % [inventory, max_inventory]
+		var sw := font.get_string_size(sd_str, HORIZONTAL_ALIGNMENT_LEFT, -1, ss).x
 		var pulse := 0.85 + 0.15 * sin(game_time * 3.0)
 		draw_point_glow(Vector2(22 + sw + ss * 0.5, 56 - ss * 0.34), ss * 0.26 * pulse, style.square_ready)
 	# (CORE LOW warning now renders in the shared top-center slot — see the banner block below.)
@@ -1818,7 +1994,8 @@ func _draw_hud(font: Font) -> void:
 	elif not started and phase == "play":
 		dtext(font, sc + Vector2(-500, -180), "PRESS SPACE TO LAUNCH", HORIZONTAL_ALIGNMENT_CENTER, 1000, 26, style.banner_launch)
 	elif phase == "won":
-		dtext(font, sc + Vector2(-500, -180), "PLANET SAVED!  (R)", HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_win)
+		var win_msg := "FREE AT LAST  (R)" if finale_won else "PLANET SAVED!  (R)"
+		dtext(font, sc + Vector2(-500, -180), win_msg, HORIZONTAL_ALIGNMENT_CENTER, 1000, 30, style.banner_win)
 	elif phase == "dead":
 		dtext(font, sc + Vector2(-500, -180), "%s  (R)" % dead_reason, HORIZONTAL_ALIGNMENT_CENTER, 1000, 24, style.banner_lose)
 
@@ -1887,6 +2064,37 @@ func pause_btn_rect() -> Rect2:
 	var vp := get_viewport_rect().size
 	var s := 46.0
 	return Rect2(vp.x - s - 26.0, 26.0, s, s)
+
+
+# The true-ending victory screen: large white title, run stats, and two stacked buttons. No game UI.
+func _draw_finale_end(font: Font) -> void:
+	var sc := screen_center()
+	finale_hit.clear()
+	var cyan: Color = style.banner_pause
+	var white := Color(1, 1, 1)
+	draw_string(font, Vector2(sc.x - 700, sc.y - 200), "Freedom at last ...", HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, white)
+	var secs := int(finale_time)
+	draw_string(font, Vector2(sc.x - 700, sc.y - 70), "Completion time:  %d:%02d" % [secs / 60, secs % 60], HORIZONTAL_ALIGNMENT_CENTER, 1400, 30, cyan)
+	draw_string(font, Vector2(sc.x - 700, sc.y - 24), "Total Stardust collected:  %d" % total_stardust, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
+	draw_string(font, Vector2(sc.x - 700, sc.y + 12), "Total comets collected:  %d" % total_comets, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
+	draw_string(font, Vector2(sc.x - 700, sc.y + 48), "Total enemies defeated:  %d" % total_enemies, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
+	# Two buttons stacked + centered (mirrors the main menu).
+	var bw := 320.0
+	var bh := 58.0
+	var bx := sc.x - bw * 0.5
+	var by := sc.y + 110.0
+	var again := Rect2(bx, by, bw, bh)
+	var menu := Rect2(bx, by + bh + 18.0, bw, bh)
+	_draw_finale_button(font, again, "PLAY AGAIN")
+	_draw_finale_button(font, menu, "MAIN MENU")
+	finale_hit.append({ "rect": again, "action": "again" })
+	finale_hit.append({ "rect": menu, "action": "menu" })
+
+
+func _draw_finale_button(font: Font, r: Rect2, label: String) -> void:
+	draw_rect(r, Color(0.12, 0.14, 0.20, 0.95))
+	draw_rect(r, style.banner_pause, false, 2.0)   # cyan border
+	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, Color(0.92, 0.95, 1.0))
 
 
 # "Are you sure?" overlay shown when R is pressed mid-run (Pleenko-style restart confirm).
