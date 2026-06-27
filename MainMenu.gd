@@ -42,7 +42,7 @@ const LOGO_MARGIN := 64.0           # px from the bottom-right corner
 # Jam rule: credit everything you didn't make (also tracked in CREDITS.md → itch description).
 # Each entry is [SECTION HEADER (caps), body]. The infinity icon still needs a source.
 const CREDITS_SECTIONS := [
-	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Durrant (8-bit Curls)"],
+	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Durrant (8-Bit Curls)"],
 	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumoterris)"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
 	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
@@ -354,7 +354,7 @@ func _build_ui() -> void:
 	_credits_box.visible = false
 	_ui.add_child(_credits_box)
 
-	# 8-bit Curls brand mark, pinned to the bottom-right corner.
+	# 8-Bit Curls brand mark, pinned to the bottom-right corner.
 	_logo = TextureRect.new()
 	_logo.texture = load("res://assets/icons/8bit-curls-logo-white.png")
 	_logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
