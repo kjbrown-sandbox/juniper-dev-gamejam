@@ -42,7 +42,7 @@ const LOGO_MARGIN := 64.0           # px from the bottom-right corner
 # Jam rule: credit everything you didn't make (also tracked in CREDITS.md → itch description).
 # Each entry is [SECTION HEADER (caps), body]. The infinity icon still needs a source.
 const CREDITS_SECTIONS := [
-	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Brown (8-bit Curls)"],
+	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Durrant (8-bit Curls)"],
 	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumoterris)"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
 	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
