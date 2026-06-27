@@ -42,12 +42,12 @@ const MIN_W     := 920.0    # narrow floor when only 1–2 sections show and no 
 const SECT_W    := 440.0    # one section box
 const MARGIN    := 56.0     # frame edge -> section
 const COL_GAP   := 44.0
-const ROW_GAP   := 44.0
-const TOP_BAND  := 150.0    # title + stardust readout
-const BOT_PAD   := 132.0    # room below the last row for the Back button + footer hint
+const ROW_GAP   := 38.0
+const TOP_BAND  := 132.0    # title + stardust readout
+const BOT_PAD   := 112.0    # room below the last row for the Back button + footer hint
 const BACK_W    := 240.0
 const BACK_H    := 54.0
-const SECT_H    := 380.0
+const SECT_H    := 334.0
 const HEADER_H  := 54.0
 
 var _font: Font
@@ -104,7 +104,7 @@ func default_sections() -> Array:
 		{ "id": "attack", "title": "Attack", "row": 1, "upgrades": [
 			{ "id": "atk_main", "name": "Basic", "desc": "+1 damage, comets slow less",
 			  "sd": [0, 0, 0], "cm": [1, 4, 9] },
-			{ "id": "atk_premium", "name": "Ram", "desc": "Deal damage even on miss",
+			{ "id": "atk_premium", "name": "Ram", "desc": "Auto-ram comets and enemies",
 			  "sd": [10], "cm": [2], "premium": true },
 		] },
 		{ "id": "comet", "title": "Comet", "row": 1, "upgrades": [

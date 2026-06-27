@@ -135,9 +135,11 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var fin_collapse_time := 3.0    # how long the rings/core take to shrink away
 @export var fin_finale_speed := 900.0   # speed the moon is set to for the escape (regardless of prior speed)
 @export var fin_escape_rate := 700.0    # px/s the moon drifts outward while leaving
+@export var fin_fade := 2.0             # victory screen: per-element fade-in duration
+@export var fin_hold := 0.5             # victory screen: pause after each element before the next starts
 
 # ── Debug ──────────────────────────────────────────────────
-@export var debug_start := false         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
+@export var debug_start := true         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
 
 # ── State ──────────────────────────────────────────────────
 var phase := "play"      # play | dead | won | finale (the escape cinematic)
@@ -149,11 +151,13 @@ var fin_stage := 0              # cinematic stage: 0,1 = glide out; 2 = leave+co
 var fin_t := 0.0                # timer within the current cinematic stage
 var finale_scale := 1.0         # draw-only multiplier shrinking the rings/core during the collapse
 var finale_time := 0.0          # run length captured at the escape (for the victory screen)
+var finale_end_t := 0.0         # seconds the victory screen has been showing (drives the staged fade-in)
 var finale_hit: Array = []      # clickable victory-screen buttons: { rect, action }
 # Run totals for the victory screen (cumulative, not the spendable wallets).
 var total_stardust := 0
 var total_comets := 0
 var total_enemies := 0
+var max_speed_seen := 0.0       # fastest the moon went during play (victory stat)
 var started := false     # the moon waits at the top until the first SPACE (launch)
 var dead_reason := ""
 var top_angle := -PI / 2.0
@@ -404,10 +408,12 @@ func reset() -> void:
 	fin_t = 0.0
 	finale_scale = 1.0
 	finale_time = 0.0
+	finale_end_t = 0.0
 	finale_hit.clear()
 	total_stardust = 0
 	total_comets = 0
 	total_enemies = 0
+	max_speed_seen = 0.0
 	core = core_start
 	core_lit = 0.0
 	inventory = 0
@@ -503,7 +509,7 @@ func debug_setup() -> void:
 	enemy_active = true
 	threat_spawn_count = 0
 	threat_timer = enemy_first_delay
-	inventory = 50
+	inventory = 500
 	asteroid_mats = 50
 	# Own every non-Finale upgrade: apply each level's effect and mark the menu card maxed.
 	for s in upgrade_menu.sections:
@@ -747,6 +753,8 @@ func try_seal() -> void:
 # ── Sim ────────────────────────────────────────────────────
 func _process(delta: float) -> void:
 	if phase == "won" or phase == "dead":
+		if finale_won:
+			finale_end_t += delta   # drives the staged fade-in of the victory screen
 		queue_redraw()
 		return
 	if phase == "finale":
@@ -814,6 +822,7 @@ func _tick_play(sim: float) -> void:
 		return   # parked at the top until the first SPACE launches us
 	core_lit = minf(1.0, core_lit + sim / maxf(0.01, core_flare_time))   # the launch flare brings the core alive
 	speed = clampf(speed - cur_decay() * sim, min_speed, max_speed)
+	max_speed_seen = maxf(max_speed_seen, speed)   # victory stat
 
 	# Blaster core drain.
 	if beam_on:
@@ -1064,20 +1073,25 @@ func _tick_threats(sim: float) -> void:
 				t.latched = true
 		else:
 			core -= t.drain * sim
-		# Passing an enemy slows you like an asteroid (on a cooldown). A successful SPACE that
-		# pass sets t.cd, so killing/hitting it skips the slow. With Ramming, a missed-SPACE
-		# collision still slows but chips 1 HP off the enemy.
-		if t.cd <= 0.0 and moon_world().distance_to(ring_point(t.radius, t.angle)) < enemy_contact_dist:
-			if slow_iframe <= 0.0:                # global i-frame: one slow per second total
-				speed = maxf(min_speed, speed * asteroid_hit_mult)
-				slow_iframe = 1.0
+		# Passing an enemy slows you like an asteroid (on a cooldown). A SPACE hit sets t.cd so it
+		# skips the slow; Ramming chips 1 HP on a missed-SPACE bump. AND on the inner ring, Ram
+		# vacuums latched enemies (wider reach, full damage, no slowdown) as you orbit past them.
+		var ep := ring_point(t.radius, t.angle)
+		var d := moon_world().distance_to(ep)
+		var ram_inner: bool = has_ramming and current_ring == 0 and t.latched and d < enemy_hit_dist
+		if t.cd <= 0.0 and (d < enemy_contact_dist or ram_inner):
+			if ram_inner:
+				t.hp -= hit_damage                # full ram damage, no slow (like the asteroid vacuum)
+			else:
+				if slow_iframe <= 0.0:            # global i-frame: one slow per second total
+					speed = maxf(min_speed, speed * asteroid_hit_mult)
+					slow_iframe = 1.0
+				if has_ramming:
+					t.hp -= 1
 			t.cd = asteroid_hit_cd
 			shake = minf(1.8, shake + 0.3)
-			var cp := ring_point(t.radius, t.angle)
 			for i in 5:
-				particles.append({ "pos": cp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
-			if has_ramming:
-				t.hp -= 1
+				particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
 	cull_threats()
 
 	core = maxf(0.0, core)   # core can run dry (lights stop spawning), but it's not an instant loss
@@ -1442,6 +1456,7 @@ func _tick_finale(delta: float) -> void:
 		3:   # done — the true ending
 			phase = "won"
 			finale_won = true
+			finale_end_t = 0.0   # start the victory-screen fade-in from zero
 
 
 func show_hint(text: String, dur: float, col: Color) -> void:
@@ -2071,30 +2086,43 @@ func _draw_finale_end(font: Font) -> void:
 	var sc := screen_center()
 	finale_hit.clear()
 	var cyan: Color = style.banner_pause
-	var white := Color(1, 1, 1)
-	draw_string(font, Vector2(sc.x - 700, sc.y - 200), "Freedom at last ...", HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, white)
-	var secs := int(finale_time)
-	draw_string(font, Vector2(sc.x - 700, sc.y - 70), "Completion time:  %d:%02d" % [secs / 60, secs % 60], HORIZONTAL_ALIGNMENT_CENTER, 1400, 30, cyan)
-	draw_string(font, Vector2(sc.x - 700, sc.y - 24), "Total Stardust collected:  %d" % total_stardust, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
-	draw_string(font, Vector2(sc.x - 700, sc.y + 12), "Total comets collected:  %d" % total_comets, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
-	draw_string(font, Vector2(sc.x - 700, sc.y + 48), "Total enemies defeated:  %d" % total_enemies, HORIZONTAL_ALIGNMENT_CENTER, 1400, 26, white)
-	# Two buttons stacked + centered (mirrors the main menu).
-	var bw := 320.0
-	var bh := 58.0
-	var bx := sc.x - bw * 0.5
-	var by := sc.y + 110.0
-	var again := Rect2(bx, by, bw, bh)
-	var menu := Rect2(bx, by + bh + 18.0, bw, bh)
-	_draw_finale_button(font, again, "PLAY AGAIN")
-	_draw_finale_button(font, menu, "MAIN MENU")
-	finale_hit.append({ "rect": again, "action": "again" })
-	finale_hit.append({ "rect": menu, "action": "menu" })
+	# Staggered fade-in: title, then the big completion time, then the stat block, then the buttons.
+	# Each element fades over fin_fade, then holds fin_hold before the next one starts.
+	var step := fin_fade + fin_hold
+	var a_title := clampf(finale_end_t / fin_fade, 0.0, 1.0)
+	var a_time := clampf((finale_end_t - step) / fin_fade, 0.0, 1.0)
+	var a_stats := clampf((finale_end_t - 2.0 * step) / fin_fade, 0.0, 1.0)
+	var a_btns := clampf((finale_end_t - 3.0 * step) / fin_fade, 0.0, 1.0)
+
+	draw_string(font, Vector2(sc.x - 700, sc.y - 300), "Freedom at last ...", HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, Color(1, 1, 1, a_title))
+	if a_time > 0.0:
+		var secs := int(finale_time)
+		draw_string(font, Vector2(sc.x - 700, sc.y - 170), "Completion time:  %d:%02d" % [secs / 60, secs % 60], HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, Color(cyan.r, cyan.g, cyan.b, a_time))
+	if a_stats > 0.0:
+		var w := Color(1, 1, 1, a_stats)
+		draw_string(font, Vector2(sc.x - 700, sc.y - 72), "Total Stardust collected:  %d" % total_stardust, HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
+		draw_string(font, Vector2(sc.x - 700, sc.y - 26), "Total comets collected:  %d" % total_comets, HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
+		draw_string(font, Vector2(sc.x - 700, sc.y + 20), "Total enemies defeated:  %d" % total_enemies, HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
+		draw_string(font, Vector2(sc.x - 700, sc.y + 66), "Max speed:  %d" % int(max_speed_seen), HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
+	# Two buttons stacked + centered (mirrors the main menu); only clickable once they've appeared.
+	if a_btns > 0.0:
+		var bw := 320.0
+		var bh := 58.0
+		var bx := sc.x - bw * 0.5
+		var by := sc.y + 110.0
+		var again := Rect2(bx, by, bw, bh)
+		var menu := Rect2(bx, by + bh + 18.0, bw, bh)
+		_draw_finale_button(font, again, "PLAY AGAIN", a_btns)
+		_draw_finale_button(font, menu, "MAIN MENU", a_btns)
+		finale_hit.append({ "rect": again, "action": "again" })
+		finale_hit.append({ "rect": menu, "action": "menu" })
 
 
-func _draw_finale_button(font: Font, r: Rect2, label: String) -> void:
-	draw_rect(r, Color(0.12, 0.14, 0.20, 0.95))
-	draw_rect(r, style.banner_pause, false, 2.0)   # cyan border
-	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, Color(0.92, 0.95, 1.0))
+func _draw_finale_button(font: Font, r: Rect2, label: String, a: float) -> void:
+	draw_rect(r, Color(0.12, 0.14, 0.20, 0.95 * a))
+	var bc: Color = style.banner_pause
+	draw_rect(r, Color(bc.r, bc.g, bc.b, a), false, 2.0)   # cyan border
+	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, Color(0.92, 0.95, 1.0, a))
 
 
 # "Are you sure?" overlay shown when R is pressed mid-run (Pleenko-style restart confirm).
