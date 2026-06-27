@@ -1052,7 +1052,7 @@ func do_beam() -> void:
 
 
 func enemy_interval(_i: int) -> float:
-	return 20.0   # flat 20s between waves
+	return 25  # flat 20s between waves
 
 
 func enemy_bumps(rnd: int) -> int:
