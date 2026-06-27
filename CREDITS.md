@@ -16,6 +16,11 @@ Assets not made by me — must be reproduced in the itch.io game description (ja
 - In-game theme "Magic Space" (`assets/sound/magic space.mp3`) — **CodeManu**, OpenGameArt.org,
   **CC0 / Public Domain**. <https://opengameart.org/content/magic-space>
 
+## Sound effects
+
+- Gameplay & UI SFX (`assets/sound/sfx/`) — **"Pixel Combat" by Helton Yan**.
+  <!-- TODO: confirm the exact license + required attribution string for this pack and paste it here. -->
+
 ## Capsule art
 
 - Dane Durrant

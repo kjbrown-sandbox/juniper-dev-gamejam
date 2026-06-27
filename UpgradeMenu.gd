@@ -205,6 +205,7 @@ func open() -> void:
 
 
 func close() -> void:
+	Sfx.play("ui_cancel")
 	_mode = "closed"
 	visible = false
 	closed.emit()
@@ -378,6 +379,7 @@ func _nav(dir: Vector2) -> void:
 			best = i
 	if best >= 0:
 		selected = best
+		Sfx.play("shop_move")
 
 
 # SPACE activates the selected target: the Back button closes; an upgrade card buys it.
@@ -395,6 +397,7 @@ func _try_buy() -> void:
 	stardust -= c[0]
 	comets -= c[1]
 	u.level = int(u.level) + 1
+	Sfx.play("purchase")
 	purchased.emit(sections[card.si].id, u.id, int(u.level))
 	# Buying never closes the shop (only B does). If this card is now maxed/unaffordable, hop the
 	# selection to the nearest still-buyable card; if none remain, just leave it highlighted here.

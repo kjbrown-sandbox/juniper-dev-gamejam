@@ -156,7 +156,11 @@ var fin_slowing := false        # ...and reached the leftmost orbit point -> eas
 var finale_moon_from := Vector2.ZERO   # the moon's screen pos when the escape ends; it glides to the period
 var finale_time := 0.0          # run length captured at the escape (for the victory screen)
 var finale_end_t := 0.0         # seconds the victory screen has been showing (drives the staged fade-in)
-var finale_hit: Array = []      # clickable victory-screen buttons: { rect, action }
+var _end_ui: CanvasLayer        # victory-screen buttons live here (real Buttons, built in _ready)
+var _end_holder: Control        # parent Control whose modulate drives the staged fade-in
+var _end_again: Button
+var _end_menu: Button
+var _core_bought_in_shop := false   # a Core upgrade was bought this shop visit -> top core off on close
 # Run totals for the victory screen (cumulative, not the spendable wallets).
 var total_stardust := 0
 var total_comets := 0
@@ -242,7 +246,11 @@ var armor_level := 0      # asteroid-armor tier (0-3): mitigates the ring-2 slow
 var hit_damage := 1       # SPACE damage per hit to asteroids/enemies; +1 per Horns level
 var core_refill_rate := 1.5   # core HP/s restored while orbiting home; upgrade ladder 1.5→5→10→20
 var refill_emit := 0.0        # cadence timer for the moon-mote suck-in fluff while recharging
+var refill_sfx := 0.0         # separate cadence for the refill SOUND (one tick per 0.5s, not per mote)
+var stardust_spawn_delay := 0.0   # after ring 2 seals, hold off the first Stardust spawn this long
 var beam_on := false
+var _beam_sfx := false        # edge-tracks the blaster loop so we start/stop it only on changes
+var _core_crit_sfx := false   # latches the low-core danger alarm so it fires once per crossing
 var upgrade_menu: Control    # the UpgradeMenu scene instance (built in _ready)
 var shop_sq: Array = []
 var shop_bt: Array = []
@@ -271,6 +279,7 @@ func _ready() -> void:
 		(ms as AudioStreamMP3).loop = true
 	music.stream = ms
 	add_child(music)
+	_setup_music_bus()   # route music through a low-pass "Music" bus so we can muffle it on pause
 	# Recolor the green arrow art to the hint text color for the ring-nav prompt.
 	arrow_tex = Icon.recolored(load("res://assets/icons/arrows.png"), style.banner_info)
 	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
@@ -310,7 +319,123 @@ func _ready() -> void:
 	mcs.shape = moon_shape
 	moon_area.add_child(mcs)
 	add_child(moon_area)
+	_build_end_buttons()
 	reset()
+
+
+# Route in-game music through its own "Music" bus (a child of Master) carrying a low-pass filter.
+# Disabled normally; flipped on while paused so the track sounds muffled — as if heard through a
+# wall — rather than just quieter. (AudioServer buses persist across scene reloads, so reuse one
+# if it already exists from a previous run.)
+func _setup_music_bus() -> void:
+	var idx := AudioServer.get_bus_index("Music")
+	if idx == -1:
+		idx = AudioServer.bus_count
+		AudioServer.add_bus(idx)
+		AudioServer.set_bus_name(idx, "Music")
+		AudioServer.set_bus_send(idx, "Master")
+		AudioServer.add_bus_effect(idx, AudioEffectLowPassFilter.new())
+		idx = AudioServer.get_bus_index("Music")
+	var lpf := AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
+	if lpf:
+		lpf.cutoff_hz = 900.0   # gentle muffle: higher cutoff = clearer (set each setup so reloads update)
+	music.bus = "Music"
+	_set_music_muffled(false)
+
+
+# Toggle the muffle: enable the low-pass + drop the bus a touch so paused/shop music reads as
+# "behind a wall." The volume dip is on top of the filter, not instead of it.
+func _set_music_muffled(on: bool) -> void:
+	var idx := AudioServer.get_bus_index("Music")
+	if idx >= 0:
+		AudioServer.set_bus_effect_enabled(idx, 0, on)
+		AudioServer.set_bus_volume_db(idx, -4.0 if on else 0.0)
+
+
+# ── Victory-screen buttons (real Button nodes) ─────────────
+# Built once, hidden until the win resolves. They give us keyboard nav + hover/click sounds for free
+# (like the main menu), instead of the old hand-drawn rects. The staged fade-in is done by animating
+# the holder's modulate alpha from _update_end_buttons().
+func _build_end_buttons() -> void:
+	_end_ui = CanvasLayer.new()
+	_end_ui.layer = 11
+	add_child(_end_ui)
+	_end_holder = Control.new()
+	_end_holder.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_end_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_end_ui.add_child(_end_holder)
+	var bw := 320.0
+	var bh := 58.0
+	var c := get_viewport_rect().size * 0.5
+	_end_again = _make_end_button("PLAY AGAIN")
+	_end_again.position = Vector2(c.x - bw * 0.5, c.y + 190.0)
+	_end_again.custom_minimum_size = Vector2(bw, bh)
+	_end_again.size = Vector2(bw, bh)
+	_end_again.pressed.connect(_on_end_again)
+	_end_holder.add_child(_end_again)
+	_end_menu = _make_end_button("MAIN MENU")
+	_end_menu.position = Vector2(c.x - bw * 0.5, c.y + 190.0 + bh + 18.0)
+	_end_menu.custom_minimum_size = Vector2(bw, bh)
+	_end_menu.size = Vector2(bw, bh)
+	_end_menu.pressed.connect(_on_end_menu)
+	_end_holder.add_child(_end_menu)
+	_end_ui.visible = false
+
+
+func _make_end_button(label: String) -> Button:
+	var b := Button.new()
+	b.text = label
+	b.add_theme_font_override("font", ui_font)
+	b.add_theme_font_size_override("font_size", 26)
+	b.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
+	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
+	b.add_theme_color_override("font_focus_color", Color(1, 1, 1))
+	b.add_theme_color_override("font_pressed_color", Color(1, 1, 1))
+	var cyan: Color = style.banner_pause
+	b.add_theme_stylebox_override("normal", _end_sb(Color(0.12, 0.14, 0.20, 0.95), cyan, 2))
+	var hov := _end_sb(Color(0.20, 0.27, 0.38, 0.98), cyan, 3)
+	b.add_theme_stylebox_override("hover", hov)
+	b.add_theme_stylebox_override("pressed", hov)
+	b.add_theme_stylebox_override("focus", hov)   # focus reads like hover (keyboard nav)
+	# Focus is the single source of truth for both mouse and keyboard (same as the main menu).
+	b.mouse_entered.connect(b.grab_focus)
+	b.focus_entered.connect(func(): Sfx.play("ui_hover"))
+	return b
+
+
+func _end_sb(bg: Color, border: Color, bw: int) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = bg
+	s.border_color = border
+	s.set_border_width_all(bw)
+	s.set_corner_radius_all(4)
+	s.set_content_margin_all(10)
+	return s
+
+
+# Reveal + fade the victory buttons in sync with the staged end-screen schedule (same `a_btns` curve
+# as the title/stats). Called from the won branch of _process.
+func _update_end_buttons() -> void:
+	if _end_holder == null:
+		return
+	var step := fin_fade + fin_hold
+	var a_btns := clampf((finale_end_t - 3.0 * step) / fin_fade, 0.0, 1.0)
+	if a_btns > 0.0:
+		if not _end_ui.visible:
+			_end_ui.visible = true
+			_end_again.grab_focus()   # land focus so keyboard nav works immediately
+		_end_holder.modulate.a = a_btns
+
+
+func _on_end_again() -> void:
+	Sfx.play("ui_confirm")
+	MainMenu.skip_to_intro = true   # replay the menu->game moon-fall, landing on the start frame
+	get_tree().change_scene_to_file("res://MainMenu.tscn")
+
+
+func _on_end_menu() -> void:
+	Sfx.play("ui_confirm")
+	get_tree().change_scene_to_file("res://MainMenu.tscn")
 
 
 # ── Shop data ──────────────────────────────────────────────
@@ -414,7 +539,11 @@ func reset() -> void:
 	fin_slowing = false
 	finale_time = 0.0
 	finale_end_t = 0.0
-	finale_hit.clear()
+	_core_bought_in_shop = false
+	if _end_ui:
+		_end_ui.visible = false   # hide the victory buttons on restart...
+		if is_inside_tree():
+			get_viewport().gui_release_focus()   # ...and drop focus so a hidden button can't eat SPACE
 	total_stardust = 0
 	total_comets = 0
 	total_enemies = 0
@@ -429,6 +558,8 @@ func reset() -> void:
 	spawning.clear()
 	core_charge = 0.0
 	refill_emit = 0.0
+	refill_sfx = 0.0
+	stardust_spawn_delay = 0.0
 	lights = [top_angle]   # a boost waits right under the player to launch with
 	materials.clear()
 	flying.clear()
@@ -442,6 +573,7 @@ func reset() -> void:
 	asteroid_respawn = 0.0
 	square_respawn = 0.0
 	paused = false
+	_set_music_muffled(false)   # clear any leftover pause muffle on restart
 	confirm_reset = false
 	confirm_hit.clear()
 	shop_open = false
@@ -462,6 +594,9 @@ func reset() -> void:
 	hit_damage = 1
 	core_refill_rate = 1.5
 	beam_on = false
+	_beam_sfx = false
+	_core_crit_sfx = false
+	Sfx.stop("beam")
 	bought = {}
 	# restore upgrade-modified tunables to their export bases (snapshotted in _ready)
 	tail_life = _base.tail_life
@@ -684,6 +819,7 @@ func rand_ahead() -> float:
 # ── Spawners ───────────────────────────────────────────────
 func spawn_square() -> void:
 	# A new square appears immediately but fades in over square_ready_time before it's grabbable.
+	# (No sound on this dim appearance — the "ready" pop in _tick_play is what plays square_ready.)
 	materials.append({ "angle": randf_range(-PI, PI), "ready": square_ready_time })
 
 
@@ -719,6 +855,7 @@ func try_seal() -> void:
 	sealed[current_ring] = true
 	min_speed += 100.0      # each seal raises the floor (50 → 150 → 250)
 	sealing = false         # cinematic done; tail despawn resumes
+	Sfx.play("seal", 0.0, 1.0, -6.0)   # -6 dB ≈ half volume (this cue was too loud)
 	hitstop = seal_hitstop
 	shake = minf(2.5, shake + 1.4)
 	var mp := moon_world()
@@ -729,6 +866,7 @@ func try_seal() -> void:
 		# The last ring is sealed — no instant win anymore. It unlocks the Finale shop section; the
 		# real ending comes from buying "Freedom?". No ring 4 to open, so don't bump unlocked.
 		finale_unlocked = true
+		Sfx.play("seal_final")   # falls back silently; gather a distinct file or reuse seal.wav
 		banner_text = "FINAL RING SEALED — FINAL UPGRADES"
 		banner_timer = 3.0
 		return
@@ -747,7 +885,8 @@ func try_seal() -> void:
 	banner_text = "RING SEALED — RING %d OPEN" % unlocked
 	banner_timer = 2.5
 	if unlocked == 2:
-		refill_materials()              # ring 2 opens with squares ready to grab
+		materials.clear()
+		stardust_spawn_delay = 1.0      # hold off the first Stardust for 1s after the ring seals
 		enemy_active = true             # enemies begin once the second ring is unlocked...
 		threat_spawn_count = 0
 		threat_timer = enemy_first_delay   # ...first wave 5s later, then every enemy_interval (20s)
@@ -760,9 +899,14 @@ func _process(delta: float) -> void:
 	if phase == "won" or phase == "dead":
 		if finale_won:
 			finale_end_t += delta   # drives the staged fade-in of the victory screen
+			_update_end_buttons()
+		beam_on = false
+		_sync_beam()
 		queue_redraw()
 		return
 	if phase == "finale":
+		beam_on = false
+		_sync_beam()
 		_tick_play(delta)     # the world keeps simulating; the moon spirals out (finale branch inside)
 		_tick_finale(delta)   # following camera + world fade-out
 		_tick_fx(delta)
@@ -770,11 +914,13 @@ func _process(delta: float) -> void:
 		return
 	if paused or shop_open or confirm_reset:
 		beam_on = false
+		_sync_beam()
 		queue_redraw()
 		return
 
 	# Blaster: held F (only with the upgrade, while playing).
 	beam_on = has_blasters and phase == "play" and Input.is_key_pressed(KEY_F)
+	_sync_beam()   # start/stop the looping beam sfx on its on/off edges
 
 	if started and phase == "play":
 		game_time += delta
@@ -909,6 +1055,7 @@ func _tick_play(sim: float) -> void:
 			if wrapf(la + gate_ang - a0, 0.0, TAU) <= dlt:   # crossed the trailing edge this frame
 				if combo > 1:
 					popups.append({ "pos": ring_point(display_radius, la) + Vector2(0, -34), "text": "COMBO BREAK", "life": 0.8, "size": 18 })
+					Sfx.play("combo_break")
 				combo = 0
 
 	if not fin:
@@ -917,7 +1064,9 @@ func _tick_play(sim: float) -> void:
 	# Keep material_max squares present (new ones spawn instantly), and fade them in. A small
 	# burst of light pops the moment a square becomes grabbable.
 	if unlocked >= 2:
-		while materials.size() < material_max:
+		if stardust_spawn_delay > 0.0:
+			stardust_spawn_delay -= sim   # newly-sealed ring waits before the first Stardust appears
+		while stardust_spawn_delay <= 0.0 and materials.size() < material_max:
 			spawn_square()
 		for m in materials:
 			if m.ready > 0.0:
@@ -925,6 +1074,7 @@ func _tick_play(sim: float) -> void:
 				if m.ready <= 0.0:
 					m.ready = 0.0
 					var bp := ring_point(ring_r(1), m.angle)
+					Sfx.play("square_ready", 0.08)
 					flashes.append({ "pos": bp, "life": 0.4 })
 					for n in 6:
 						particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(60.0, 140.0), "life": randf_range(0.2, 0.4) })
@@ -949,6 +1099,7 @@ func _tick_play(sim: float) -> void:
 					core -= light_cost
 					spawning.append({ "angle": rand_ahead(), "t": 0.0, "charge": light_charge_time })
 					core_charge = 1.0                     # kick the core's drain wobble/dip on payment
+					Sfx.play("light_charge")
 
 	# Advance lights in flight from the core: pre-spawn charge (shake) first, then ease out.
 	core_charge = maxf(0.0, core_charge - sim / maxf(0.01, light_charge_time))
@@ -964,6 +1115,7 @@ func _tick_play(sim: float) -> void:
 			spawning.remove_at(i)
 			flashes.append({ "pos": ring_point(display_radius, fs.angle), "life": 0.3, "r": 40.0 })   # latch pop
 			shake = minf(1.6, shake + 0.25)       # snap on the abrupt stop
+			Sfx.play("light_ready", 0.06)
 
 	# Moon-motes falling into the core while it recharges (visual only — fill is the steady rate).
 	for f in flying:
@@ -994,6 +1146,7 @@ func _tick_play(sim: float) -> void:
 						total_comets += 1
 						asteroid_respawn = asteroid_respawn_delay
 						popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
+						Sfx.play("asteroid_break")   # ram shatters it outright
 						for n in 6:
 							particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
 						if has_asteroid_boost:
@@ -1001,6 +1154,7 @@ func _tick_play(sim: float) -> void:
 					elif slow_iframe <= 0.0:              # global i-frame: one slow per second total
 						speed = speed * ast_slow_miss()
 						slow_iframe = 1.0
+						Sfx.play("bump", 0.10)
 					ast.cd = asteroid_hit_cd
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
@@ -1015,6 +1169,11 @@ func _tick_play(sim: float) -> void:
 	if (current_ring == 0 or sealed[current_ring]) and not moving and not core_under_attack() and not fin:
 		core = minf(core_max_eff(), core + core_refill_rate * sim)
 		if core < core_max_eff():
+			# Refill SOUND runs on its own slow 0.5s cadence (independent of the faster mote visuals).
+			refill_sfx -= sim
+			if refill_sfx <= 0.0:
+				refill_sfx = 0.5
+				Sfx.play("refill_tick")
 			refill_emit -= sim
 			if refill_emit <= 0.0:
 				refill_emit = refill_emit_step
@@ -1024,8 +1183,19 @@ func _tick_play(sim: float) -> void:
 	# Death only when the planet's core is drained to nothing (never during the escape).
 	if core <= 0.0 and not fin:
 		phase = "dead"
+		Sfx.play("lose")
 		if dead_reason == "":
 			dead_reason = "THE PLANET'S CORE DIED"
+
+	# Low-core danger alarm: fire once as the core first drops into the vignette danger zone, then
+	# re-arm when it climbs back out (matches the _draw_vignette threshold).
+	if not fin:
+		var crit := unlocked >= 2 and core > 0.0 and core / maxf(1.0, core_cap) <= core_low_frac
+		if crit and not _core_crit_sfx:
+			Sfx.play("core_critical")
+			_core_crit_sfx = true
+		elif not crit:
+			_core_crit_sfx = false
 
 	# Back at the hub, no enemy ON the inner ring, and the core topped back off -> open the shop.
 	# (Enemies still flying inward no longer block it — only a latched one does.)
@@ -1048,7 +1218,18 @@ func do_beam() -> void:
 				particles.append({ "pos": tp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 260.0), "life": randf_range(0.2, 0.5) })
 	if killed:
 		shake = minf(2.0, shake + 0.5)   # punch the screen when the beam vaporizes an enemy
+		Sfx.play("beam_kill", 0.08)
 		cull_threats()
+
+
+# Start/stop the looping blaster sfx on the edges of beam_on (called every frame from _process).
+func _sync_beam() -> void:
+	if beam_on and not _beam_sfx:
+		Sfx.loop("beam")
+		_beam_sfx = true
+	elif not beam_on and _beam_sfx:
+		Sfx.stop("beam")
+		_beam_sfx = false
 
 
 func enemy_interval(_i: int) -> float:
@@ -1096,11 +1277,13 @@ func _tick_threats(sim: float) -> void:
 		if t.beep <= 0.0:
 			t.beep += 1.0
 			flashes.append({ "pos": ring_point(t.radius, t.angle), "life": 0.6, "r": 60.0, "col": style.threat_flying })
+			Sfx.play("siphon" if t.latched else "enemy_beep", 0.0, 1.0, -3.5)   # latched = drain pulse; beep ~2/3 volume
 		if not t.latched:
 			t.radius -= threat_speed * sim
 			if t.radius <= ring_r(0):
 				t.radius = ring_r(0)
 				t.latched = true
+				Sfx.play("enemy_latch")
 		else:
 			core -= t.drain * sim
 		# Passing an enemy slows you like an asteroid (on a cooldown). A SPACE hit sets t.cd so it
@@ -1112,10 +1295,12 @@ func _tick_threats(sim: float) -> void:
 		if t.cd <= 0.0 and (d < enemy_contact_dist or ram_inner):
 			if ram_inner:
 				t.hp -= hit_damage                # full ram damage, no slow (like the asteroid vacuum)
+				Sfx.play("enemy_kill" if t.hp <= 0 else "enemy_hit", 0.08)
 			else:
 				if slow_iframe <= 0.0:            # global i-frame: one slow per second total
 					speed = maxf(min_speed, speed * asteroid_hit_mult)
 					slow_iframe = 1.0
+					Sfx.play("bump", 0.10)
 				if has_ramming:
 					t.hp -= 1
 			t.cd = asteroid_hit_cd
@@ -1146,14 +1331,24 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		match k:
 			KEY_Y, KEY_ENTER, KEY_KP_ENTER:
 				confirm_reset = false
+				Sfx.play("ui_confirm")
 				reset()
 			KEY_N, KEY_ESCAPE, KEY_R:
 				confirm_reset = false
+				Sfx.play("ui_cancel")
 		return
 
 	# Upgrade screen owns its own keys (nav / SPACE-buy / B-back, handled in UpgradeMenu._input);
 	# swallow everything else so gameplay keys don't fire behind it.
 	if shop_open:
+		return
+
+	# While paused, P or SPACE unpause; every other key is swallowed so gameplay (boost, traverse…)
+	# can't fire behind the pause screen. In particular, SPACE just unpauses — it does NOT boost.
+	if paused:
+		if k == KEY_P or k == KEY_SPACE:
+			paused = false
+			_set_music_muffled(false)
 		return
 
 	match k:
@@ -1164,6 +1359,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					started = true        # launch: kick off + the boost below
 					speed = start_speed
 					core = core_cap                 # the core is online from the first second
+					Sfx.play("launch")
 					if not music.playing:
 						music.play()    # background music starts on the very first launch, then loops
 					# Flare the core to life: an expanding yellow light ring + a burst from the core.
@@ -1176,6 +1372,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 					powerdown = powerdown_time
 					combo = 0
 					space_cd = space_cd_time
+					Sfx.play("miss")
 					popups.append({ "pos": moon_world() + Vector2(0, -30), "text": "MISS", "life": 0.7, "size": 18 })
 		KEY_B:
 			# Stardust boost: spend a carried Stardust for a soft (base, unupgraded) speed boost.
@@ -1183,6 +1380,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 				inventory -= 1
 				speed = minf(max_speed, speed + _base.boost_base)
 				var bp := moon_world()
+				Sfx.play("material_boost")
 				shake = minf(1.6, shake + 0.3)
 				for i in 10:
 					particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(110.0, 240.0), "life": randf_range(0.25, 0.5) })
@@ -1202,10 +1400,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		KEY_P:
 			if phase == "play":
 				paused = not paused
+				_set_music_muffled(paused)   # no pause SFX — instead muffle the music behind a wall
 		KEY_R:
 			# Mid-run, confirm first (accidental restarts hurt). On win/lose, just restart.
 			if phase == "play" and started:
 				confirm_reset = true
+				Sfx.play("confirm_open")
 			else:
 				reset()
 
@@ -1217,23 +1417,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	var mp := (event as InputEventMouseButton).position
 
-	# Victory screen — Play again / Main menu buttons.
-	if phase == "won" and finale_won:
-		for h in finale_hit:
-			if (h.rect as Rect2).has_point(mp):
-				if h.action == "again":
-					MainMenu.skip_to_intro = true   # replay the menu->game moon-fall, landing on the start frame
-					get_tree().change_scene_to_file("res://MainMenu.tscn")
-				elif h.action == "menu":
-					get_tree().change_scene_to_file("res://MainMenu.tscn")
-				return
-		return
+	# (Victory-screen buttons are now real Button nodes on their own CanvasLayer — they handle their
+	# own click/hover/keyboard input and signals; nothing to do here.)
 
 	# "Are you sure?" overlay — Yes / No buttons.
 	if confirm_reset:
 		for h in confirm_hit:
 			if (h.rect as Rect2).has_point(mp):
 				confirm_reset = false
+				Sfx.play("ui_confirm" if h.action == "yes" else "ui_cancel")
 				if h.action == "yes":
 					reset()
 				return
@@ -1246,6 +1438,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Pause toggle via the corner icon (Pleenko-style clickable pause button).
 	if phase == "play" and started and pause_btn_rect().has_point(mp):
 		paused = not paused
+		_set_music_muffled(paused)   # no pause SFX — instead muffle the music behind a wall
 
 
 func can_shop() -> bool:
@@ -1263,8 +1456,10 @@ func traverse(dir: int) -> void:
 	hub_pending = false   # leaving the hub cancels a pending shop
 	if dir > 0:
 		speed = maxf(min_speed, speed - traverse_cost)
+		Sfx.play("traverse_up")
 	else:
 		speed = minf(max_speed, speed + traverse_cost * 0.5)
+		Sfx.play("traverse_down")
 	move_r0 = display_radius   # continue from the moon's actual radius, not a ring snap
 	move_to = target
 	move_t = 0.0
@@ -1278,8 +1473,19 @@ func collect_square(i: int) -> void:
 	total_stardust += overflow_mult   # lifetime tally for the victory screen
 	spawn_square()   # replacement appears immediately (not grabbable until it fades in)
 	var mp := ring_point(ring_r(1), ma)
+	Sfx.play("pickup", 0.10)
 	flashes.append({ "pos": mp, "life": 0.3 })
 	popups.append({ "pos": mp, "text": "+1 stardust", "life": 0.5, "size": 16 })
+
+
+# Comet (asteroid) hit pitch by the health it's LEFT with: a perfect fifth up at 1 HP, an octave up
+# when destroyed (0 HP), base pitch at 2+ HP — so you hear the asteroid climbing toward breaking.
+func comet_pitch(hp_left: int) -> float:
+	if hp_left <= 0:
+		return 2.0     # destroyed — an octave up
+	if hp_left == 1:
+		return 1.5     # one hit from death — a perfect fifth up
+	return 1.0
 
 
 func try_boost() -> bool:
@@ -1307,10 +1513,12 @@ func try_boost() -> bool:
 		shock_c /= float(shock_pts.size())
 		flashes.append({ "pos": shock_c, "life": 0.55, "r": shock_r })
 		shake = minf(2.0, shake + 0.5)
+		Sfx.play("shockwave")
 		for n in 20:
 			particles.append({ "pos": shock_c, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(160.0, 380.0), "life": randf_range(0.3, 0.6) })
 
 	# Squares — normal reach from the moon, OR caught in the shockwave. Up to the carry cap.
+	var denied := false   # one "denied" blip per press, even if several squares are NOT READY / FULL
 	for i in range(materials.size() - 1, -1, -1):
 		var m: Dictionary = materials[i]
 		var smp := ring_point(ring_r(1), m.angle)
@@ -1318,13 +1526,17 @@ func try_boost() -> bool:
 			var sp := smp + Vector2(0, -26)
 			if m.ready > 0.0:
 				popups.append({ "pos": sp, "text": "NOT READY", "life": 0.6, "size": 14 })
+				denied = true
 				did = true
 			elif inventory >= max_inventory:
 				popups.append({ "pos": sp, "text": "FULL INVENTORY", "life": 0.6, "size": 14 })
+				denied = true
 				did = true
 			else:
 				collect_square(i)
 				did = true
+	if denied:
+		Sfx.play("denied")
 
 	# Enemies — normal reach (with the mid-air instakill) OR the shockwave (an outright kill).
 	var hit_enemy := false
@@ -1343,10 +1555,11 @@ func try_boost() -> bool:
 		hit_enemy = true
 		did = true
 		shake = minf(1.8, shake + (0.5 if t.hp <= 0 else 0.25))
+		Sfx.play("midair_kill" if midair else ("enemy_kill" if t.hp <= 0 else "enemy_hit"), 0.08)
 		for i in (10 if t.hp <= 0 else 5):
 			particles.append({ "pos": ep, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(120.0, 280.0), "life": randf_range(0.2, 0.5) })
 		if midair:
-			popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL BONUS", "life": 0.9, "size": 18 })
+			popups.append({ "pos": ep + Vector2(0, -30), "text": "MID-AIR KILL", "life": 0.9, "size": 18 })
 	if hit_enemy:
 		cull_threats()
 
@@ -1372,12 +1585,15 @@ func try_boost() -> bool:
 			for i in 6:
 				particles.append({ "pos": ap, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(90.0, 200.0), "life": randf_range(0.2, 0.45) })
 			if ast.hits_left <= 0:
+				Sfx.play("asteroid_break")                                   # destroyed — its own sound
 				asteroid_mats += 1
 				total_comets += 1
 				asteroid_respawn = asteroid_respawn_delay
 				popups.append({ "pos": ap, "text": "+1 COMET", "life": 0.7, "size": 16 })
 				if has_asteroid_boost:                              # Comet premium: a kill grants ~1/3 of a light boost
 					speed = minf(max_speed, speed + boost_base / 3.0)
+			else:
+				Sfx.play("asteroid_hit", 0.0, comet_pitch(ast.hits_left))   # hurt: base at 2 HP, a fifth up at 1 HP
 		if hit_ast:
 			asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 	return did
@@ -1396,8 +1612,12 @@ func do_boost(li: int) -> void:
 		particles.append({ "pos": lp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(110.0, 280.0), "life": randf_range(0.25, 0.55) })
 	flashes.append({ "pos": lp, "life": 0.35 })
 	popups.append({ "pos": lp, "text": ("PERFECT" if q > 0.75 else "x%d" % combo), "life": 0.7, "size": 18 })
+	# boost.wav / boost_perfect.wav = "Sparkle Passby" (Helton Yan PC-003); -6 dB so it's not too loud.
 	if q > 0.75:
 		hitstop = hitstop_time
+		Sfx.play("boost_perfect", 0.0, 1.0, -6.0)
+	else:
+		Sfx.play("boost", 0.08, 1.0, -6.0)
 	lights.remove_at(li)
 	if lights.is_empty() and spawning.is_empty():   # whole batch used — respawn after the delay
 		light_timer = light_delay + randf_range(-light_delay_jitter, light_delay_jitter)
@@ -1418,8 +1638,11 @@ func open_upgrades() -> void:
 	upgrade_menu.configure(unlocked, inventory, max_inventory, asteroid_mats, 3, finale_unlocked)
 	if upgrade_menu.any_buyable():
 		shop_open = true
+		Sfx.play("shop_open")
+		_set_music_muffled(true)   # muffle the music while the shop is up, same as pausing
 		upgrade_menu.open()
 	else:
+		Sfx.play("shop_denied")
 		show_hint("NO UPGRADES AVAILABLE", 1.6, style.banner_info)   # top-center hint instead of the menu's own banner
 
 
@@ -1432,6 +1655,10 @@ func _on_upgrade_purchased(section_id: String, upgrade_id: String, level: int) -
 
 func _on_upgrade_closed() -> void:
 	shop_open = false
+	_set_music_muffled(false)   # restore the music when the shop closes (unless the finale takes over)
+	if _core_bought_in_shop:
+		core = core_cap          # a Core upgrade tops you off to full (NOT overfilled) on leaving the shop
+		_core_bought_in_shop = false
 	if pending_finale:
 		start_finale()
 
@@ -1442,6 +1669,8 @@ func _on_upgrade_closed() -> void:
 func start_finale() -> void:
 	pending_finale = false
 	phase = "finale"
+	powerdown = 0.0   # always glowing for the escape — never stuck looking like a recovering miss
+	Sfx.play("escape")
 	finale_time = game_time   # the run's completion time (game_time is frozen during the escape)
 	world_fade = 1.0
 	fin_radial_v = fin_spiral_rate   # initial outward speed; it accelerates from here
@@ -1474,6 +1703,7 @@ func _tick_finale(delta: float) -> void:
 		if world_fade <= 0.0:
 			phase = "won"
 			finale_won = true
+			Sfx.play("win")
 			finale_end_t = 0.0
 			finale_moon_from = screen_center() + moon_world() * view_scale   # where it glides FROM
 
@@ -1499,7 +1729,8 @@ func apply_upgrade(id: String, level: int) -> void:
 		"core_main":
 			core_cap = [5.0, 15.0, 35.0, 80.0][level]          # base 5 → 15 → 35 → 80
 			core_refill_rate = [1.5, 5.0, 10.0, 20.0][level]   # base 1.5 → 5 → 10 → 20
-		"core_premium":   has_overfill = true                  # charge past full, up to 1.5×
+			_core_bought_in_shop = true                        # top the core off (to full, not overfill) on shop close
+		"core_premium":   has_overfill = true; _core_bought_in_shop = true   # charge past full, up to 1.5×
 		# ── Light boost: ×2 speed + more frequent lights, every level ──
 		"boost_main":
 			boost_base *= 2.0                                  # ×2 speed per boost...
@@ -2077,7 +2308,7 @@ func _draw_hud(font: Font) -> void:
 			top_msg = "KILL ENEMIES TO OPEN THE SHOP"
 			top_col = style.shop_blocked
 		elif hub_pending and not shop_open and current_ring == 0 and core < core_cap:
-			top_msg = "REFILL CORE TO OPEN SHOP"
+			top_msg = "ORBIT TO REFILL CORE"
 			top_col = style.shop_blocked
 		elif phase == "play" and banner_timer > 0.0:
 			top_msg = banner_text
@@ -2112,7 +2343,6 @@ func pause_btn_rect() -> Rect2:
 # The true-ending victory screen: large white title, run stats, and two stacked buttons. No game UI.
 func _draw_finale_end(font: Font) -> void:
 	var sc := screen_center()
-	finale_hit.clear()
 	var cyan: Color = style.banner_pause
 	# Staggered fade-in: title, then the big completion time, then the stat block, then the buttons.
 	# Each element fades over fin_fade, then holds fin_hold before the next one starts.
@@ -2145,28 +2375,8 @@ func _draw_finale_end(font: Font) -> void:
 		draw_string(font, Vector2(sc.x - 700, sc.y - 26), "Total comets collected:  %d" % total_comets, HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
 		draw_string(font, Vector2(sc.x - 700, sc.y + 20), "Total enemies defeated:  %d" % total_enemies, HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
 		draw_string(font, Vector2(sc.x - 700, sc.y + 66), "Max speed:  %d" % int(max_speed_seen), HORIZONTAL_ALIGNMENT_CENTER, 1400, 34, w)
-	# Two buttons stacked + centered (mirrors the main menu); only clickable once they've appeared.
-	if a_btns > 0.0:
-		var bw := 320.0
-		var bh := 58.0
-		var bx := sc.x - bw * 0.5
-		var by := sc.y + 190.0
-		var again := Rect2(bx, by, bw, bh)
-		var menu := Rect2(bx, by + bh + 18.0, bw, bh)
-		var mp := get_viewport().get_mouse_position()
-		_draw_finale_button(font, again, "PLAY AGAIN", a_btns, again.has_point(mp))
-		_draw_finale_button(font, menu, "MAIN MENU", a_btns, menu.has_point(mp))
-		finale_hit.append({ "rect": again, "action": "again" })
-		finale_hit.append({ "rect": menu, "action": "menu" })
-
-
-func _draw_finale_button(font: Font, r: Rect2, label: String, a: float, hover: bool) -> void:
-	var bg := Color(0.20, 0.27, 0.38, 0.98 * a) if hover else Color(0.12, 0.14, 0.20, 0.95 * a)
-	draw_rect(r, bg)
-	var bc: Color = style.banner_pause
-	draw_rect(r, Color(bc.r, bc.g, bc.b, a), false, 3.0 if hover else 2.0)   # cyan border, thicker on hover
-	var tcol := Color(1, 1, 1, a) if hover else Color(0.92, 0.95, 1.0, a)
-	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, tcol)
+	# The PLAY AGAIN / MAIN MENU buttons are real Button nodes (see _update_end_buttons); their staged
+	# fade-in is driven by a_btns on the holder's modulate, so nothing is drawn for them here.
 
 
 # "Are you sure?" overlay shown when R is pressed mid-run (Pleenko-style restart confirm).

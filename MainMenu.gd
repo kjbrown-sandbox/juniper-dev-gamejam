@@ -46,6 +46,7 @@ const CREDITS_SECTIONS := [
 	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumosterris)"],
 	["CAPSULE ART", "Dane Durrant"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
+	["SOUND EFFECTS", "\"Pixel Combat\" — Helton Yan"],
 	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
 ]
 const CREDITS_FOOTER := "Made for the Juniper Dev game jam with Godot 4.6"
@@ -407,6 +408,11 @@ func _make_button(text: String) -> Button:
 	b.add_theme_stylebox_override("pressed", _sb(base.darkened(0.10), border))
 	# Focus reads like hover so keyboard navigation shows which button is selected.
 	b.add_theme_stylebox_override("focus", _sb(base.lightened(0.10), border.lightened(0.15)))
+	# Hovering grabs focus too, so "focused" is the one source of truth for mouse AND keyboard — the
+	# focus sound then fires once per focus change from either input (and a hover-then-click won't
+	# double up, since the click target is already focused).
+	b.mouse_entered.connect(b.grab_focus)
+	b.focus_entered.connect(func(): Sfx.play("ui_hover"))
 	return b
 
 
@@ -425,6 +431,7 @@ func _on_play() -> void:
 	# Kick off the moon-fall + zoom-out cinematic; _process cuts to Game.tscn when it ends.
 	if state != "menu":
 		return
+	Sfx.play("ui_confirm")
 	state = "intro"
 	intro_t = 0.0
 	_title.visible = false
@@ -436,28 +443,34 @@ func _on_play() -> void:
 
 
 func _on_settings() -> void:
+	Sfx.play("ui_confirm")
 	_menu_box.visible = false
 	_settings_box.visible = true
 
 
 func _on_back() -> void:
+	Sfx.play("ui_cancel")
 	_settings_box.visible = false
 	_menu_box.visible = true
 	_play_btn.grab_focus()
 
 
 func _on_credits() -> void:
+	Sfx.play("ui_confirm")
 	_menu_box.visible = false
 	_credits_box.visible = true
 
 
 func _on_credits_back() -> void:
+	Sfx.play("ui_cancel")
 	_credits_box.visible = false
 	_menu_box.visible = true
 	_play_btn.grab_focus()
 
 
 func _on_volume_changed(v: float) -> void:
+	# No sound here on purpose: value_changed fires once per pixel of slider travel, so a blip would
+	# machine-gun while dragging. The volume change is its own feedback.
 	_set_volume(v)
 	if _pct_label != null:
 		_pct_label.text = "%d%%" % int(round(v))

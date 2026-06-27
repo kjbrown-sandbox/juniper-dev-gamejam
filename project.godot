@@ -8,6 +8,10 @@
 
 config_version=5
 
+[autoload]
+
+Sfx="*res://Sfx.gd"
+
 [application]
 
 config/name="JuniperGameJam"
