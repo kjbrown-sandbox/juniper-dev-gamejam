@@ -140,7 +140,7 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var fin_hold := 0.5             # victory screen: pause after each element before the next starts
 
 # ── Debug ──────────────────────────────────────────────────
-@export var debug_start := false         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
+@export var debug_start := true         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
 
 # ── State ──────────────────────────────────────────────────
 var phase := "play"      # play | dead | won | finale (the escape cinematic)
