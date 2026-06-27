@@ -131,15 +131,16 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var grid_glow_strength := 0.8   # extra alpha added to grid lines right under the moon
 
 # ── Finale cinematic (the "Freedom?" ending) ───────────────
-@export var fin_glide_time := 1.0       # per-ring glide during the escape
-@export var fin_collapse_time := 3.0    # how long the rings/core take to shrink away
-@export var fin_finale_speed := 900.0   # speed the moon is set to for the escape (regardless of prior speed)
-@export var fin_escape_rate := 700.0    # px/s the moon drifts outward while leaving
+@export var fin_start_speed := 1000.0    # constant escape speed (orbital pace stays the same)
+@export var fin_spiral_rate := 30.0      # initial outward (radial) speed, px/s
+@export var fin_spiral_accel := 35.0     # px/s² the outward speed grows — the spiral stretches over time
+@export var fin_slow_rate := 1.0         # how fast the comet eases to a near-stop once it starts slowing
+@export var fin_world_fade_time := 6.0   # the world fades to black over this long once the comet slows
 @export var fin_fade := 2.0             # victory screen: per-element fade-in duration
 @export var fin_hold := 0.5             # victory screen: pause after each element before the next starts
 
 # ── Debug ──────────────────────────────────────────────────
-@export var debug_start := true         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
+@export var debug_start := false         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
 
 # ── State ──────────────────────────────────────────────────
 var phase := "play"      # play | dead | won | finale (the escape cinematic)
@@ -147,9 +148,12 @@ var finale_unlocked := false   # 3rd ring sealed -> the Finale shop section appe
 var has_stardust_uncap := false # "Hoard" bought -> no carry cap
 var pending_finale := false     # "Freedom?" bought -> start the cinematic when the shop closes
 var finale_won := false         # the win came via the Finale (changes the end card)
-var fin_stage := 0              # cinematic stage: 0,1 = glide out; 2 = leave+collapse; 3 = done
-var fin_t := 0.0                # timer within the current cinematic stage
-var finale_scale := 1.0         # draw-only multiplier shrinking the rings/core during the collapse
+var world_fade := 1.0           # 1 = world fully visible; fades to 0 (everything but the moon) once
+                                # the moon leaves the outer ring during the escape
+var fin_radial_v := 0.0         # current outward speed of the escape spiral (accelerates over time)
+var fin_past_outer := false     # the comet has cleared the outer ring
+var fin_slowing := false        # ...and reached the leftmost orbit point -> ease to a stop + fade
+var finale_moon_from := Vector2.ZERO   # the moon's screen pos when the escape ends; it glides to the period
 var finale_time := 0.0          # run length captured at the escape (for the victory screen)
 var finale_end_t := 0.0         # seconds the victory screen has been showing (drives the staged fade-in)
 var finale_hit: Array = []      # clickable victory-screen buttons: { rect, action }
@@ -404,9 +408,10 @@ func reset() -> void:
 	has_stardust_uncap = false
 	pending_finale = false
 	finale_won = false
-	fin_stage = 0
-	fin_t = 0.0
-	finale_scale = 1.0
+	world_fade = 1.0
+	fin_radial_v = 0.0
+	fin_past_outer = false
+	fin_slowing = false
 	finale_time = 0.0
 	finale_end_t = 0.0
 	finale_hit.clear()
@@ -758,8 +763,9 @@ func _process(delta: float) -> void:
 		queue_redraw()
 		return
 	if phase == "finale":
-		_tick_finale(delta)   # view_scale stays frozen (no lerp here)
-		_tick_fx(delta)       # ...but particles/flashes/shake keep animating so it isn't frozen
+		_tick_play(delta)     # the world keeps simulating; the moon spirals out (finale branch inside)
+		_tick_finale(delta)   # following camera + world fade-out
+		_tick_fx(delta)
 		queue_redraw()
 		return
 	if paused or shop_open or confirm_reset:
@@ -820,38 +826,60 @@ func _tick_fx(delta: float) -> void:
 func _tick_play(sim: float) -> void:
 	if not started:
 		return   # parked at the top until the first SPACE launches us
+	var fin := phase == "finale"
 	core_lit = minf(1.0, core_lit + sim / maxf(0.01, core_flare_time))   # the launch flare brings the core alive
-	speed = clampf(speed - cur_decay() * sim, min_speed, max_speed)
-	max_speed_seen = maxf(max_speed_seen, speed)   # victory stat
+	if fin:
+		if fin_slowing:
+			# Past the outer ring and back at the leftmost orbit point — ease to a near-stop (so the
+			# moon settles in a consistent spot) while the screen fades.
+			var k := clampf(fin_slow_rate * sim, 0.0, 1.0)
+			fin_radial_v = lerpf(fin_radial_v, 0.0, k)
+			speed = lerpf(speed, 0.0, k)
+		else:
+			# Speed stays constant; the OUTWARD speed accelerates, so the spiral stretches over time.
+			fin_radial_v += fin_spiral_accel * sim
+		display_radius += fin_radial_v * sim
+	else:
+		speed = clampf(speed - cur_decay() * sim, min_speed, max_speed)
+		max_speed_seen = maxf(max_speed_seen, speed)       # victory stat (gameplay only)
 
 	# Blaster core drain.
 	if beam_on:
 		core = maxf(0.0, core - beam_drain * sim)
 		do_beam()
 
-	# Ring glide (radius drives angular pace).
-	if moving:
-		move_t += sim / maxf(0.001, traverse_time)
-		if move_t >= 1.0:
-			move_t = 1.0
-			moving = false
-			current_ring = move_to
-			# Keep the glide spiral visible (it fades on its own). It's tagged `glide` so it doesn't
-			# count toward the seal wrap — a seal still needs a full lap made ON the ring.
-			if current_ring == 0:
-				arrive_at_hub()   # bank squares + open the upgrade screen
-			if nav_hint_wait:
-				nav_hint_wait = false
-				nav_hint_show = true   # landed on the new outer ring — teach UP/DOWN
-		display_radius = lerpf(move_r0, ring_r(move_to), move_t)
-	else:
-		display_radius = ring_r(current_ring)
+	# Ring glide (radius drives angular pace). Skipped in the finale — the spiral set display_radius.
+	if not fin:
+		if moving:
+			move_t += sim / maxf(0.001, traverse_time)
+			if move_t >= 1.0:
+				move_t = 1.0
+				moving = false
+				current_ring = move_to
+				# Keep the glide spiral visible (it fades on its own). It's tagged `glide` so it doesn't
+				# count toward the seal wrap — a seal still needs a full lap made ON the ring.
+				if current_ring == 0:
+					arrive_at_hub()   # bank squares + open the upgrade screen
+				if nav_hint_wait:
+					nav_hint_wait = false
+					nav_hint_show = true   # landed on the new outer ring — teach UP/DOWN
+			display_radius = lerpf(move_r0, ring_r(move_to), move_t)
+		else:
+			display_radius = ring_r(current_ring)
 
 	# Advance, dropping tail particles along the arc just traversed (they linger tail_life).
 	var a0 := angle
 	var dlt := (speed / display_radius) * sim
 	angle = wrapf(angle + dlt, -PI, PI)
 	cum_angle += dlt
+	# Escape: once the comet clears the outer ring, wait until it next crosses the HIGHEST point of
+	# its orbit (angle = -PI/2, the top) before it starts slowing + the screen starts fading — so it
+	# always settles in the same spot, ready to become the period.
+	if fin:
+		if display_radius > ring_r(2):
+			fin_past_outer = true
+		if fin_past_outer and not fin_slowing and a0 < -PI / 2.0 and a0 + dlt >= -PI / 2.0:
+			fin_slowing = true
 	var arc := speed * sim   # arc length traversed this frame (= display_radius * dlt); spacing is per-distance
 	var nsub := clampi(int(arc / comet_emit_px), 1, 60)
 	if powerdown <= 0.0:   # powered down by a MISS: stop trailing until the moon comes back (1s)
@@ -875,7 +903,7 @@ func _tick_play(sim: float) -> void:
 	# Passing a light without hitting SPACE breaks the combo (the moment it leaves your reach behind
 	# you). If you'd pressed in time it'd already be gone (do_boost removes it). "COMBO BREAK" flashes
 	# above the light only if it actually snapped a streak (combo > 1).
-	if powerdown <= 0.0:
+	if powerdown <= 0.0 and not fin:
 		var gate_ang := (gate_dist * reach_mult()) / display_radius   # half-window in radians
 		for la in lights:
 			if wrapf(la + gate_ang - a0, 0.0, TAU) <= dlt:   # crossed the trailing edge this frame
@@ -883,7 +911,8 @@ func _tick_play(sim: float) -> void:
 					popups.append({ "pos": ring_point(display_radius, la) + Vector2(0, -34), "text": "COMBO BREAK", "life": 0.8, "size": 18 })
 				combo = 0
 
-	try_seal()
+	if not fin:
+		try_seal()
 
 	# Keep material_max squares present (new ones spawn instantly), and fade them in. A small
 	# burst of light pops the moment a square becomes grabbable.
@@ -899,8 +928,8 @@ func _tick_play(sim: float) -> void:
 					flashes.append({ "pos": bp, "life": 0.4 })
 					for n in 6:
 						particles.append({ "pos": bp, "vel": Vector2.from_angle(randf_range(-PI, PI)) * randf_range(60.0, 140.0), "life": randf_range(0.2, 0.4) })
-		# Vacuum upgrade: auto-grab ready squares within reach, no SPACE needed.
-		if has_vacuum:
+		# Vacuum upgrade: auto-grab ready squares within reach, no SPACE needed (not during the escape).
+		if has_vacuum and not fin:
 			for i in range(materials.size() - 1, -1, -1):
 				var mv: Dictionary = materials[i]
 				if mv.ready <= 0.0 and inventory < max_inventory and moon_world().distance_to(ring_point(ring_r(1), mv.angle)) < pickup_radius * reach_mult():
@@ -910,7 +939,7 @@ func _tick_play(sim: float) -> void:
 	# Lights spawn as a full batch once the previous batch is fully used; each costs 1 core.
 	# A light doesn't appear on the ring directly — it charges inside the core (shake), then a
 	# mote ejects from the core surface and flies out to its gate spot (see the `spawning` tick).
-	if lights.is_empty() and spawning.is_empty():
+	if lights.is_empty() and spawning.is_empty() and not fin:   # no new boost lights during the escape
 		light_timer -= sim
 		if light_timer <= 0.0:
 			for n in light_count:
@@ -953,8 +982,8 @@ func _tick_play(sim: float) -> void:
 				ast.cd -= sim
 		# Passing an asteroid slows you (on a cooldown). A correct SPACE hit (try_boost) sets the
 		# asteroid's cd first, so this passive slow only fires when you DIDN'T hit it — and Armor
-		# lvl 3 softens even that (ast_slow_miss).
-		if current_ring == 2:
+		# lvl 3 softens even that (ast_slow_miss). No contact during the escape — you just spiral past.
+		if current_ring == 2 and not fin:
 			for ast in asteroids:
 				if ast.cd <= 0.0 and absf(wrapf(angle - ast.angle, -PI, PI)) < asteroid_tol:
 					if has_ramming:
@@ -975,14 +1004,15 @@ func _tick_play(sim: float) -> void:
 					ast.cd = asteroid_hit_cd
 		asteroids = asteroids.filter(func(a): return a.hits_left > 0)
 
-	# Enemies run on the clock from launch (we're past the not-started early-return).
-	_tick_threats(sim)
+	# Enemies run on the clock from launch (we're past the not-started early-return). None in the finale.
+	if not fin:
+		_tick_threats(sim)
 
 	# Core recharges over time ONLY on the inner ring (home base) — paused only if an enemy has
 	# actually reached the inner ring (a still-traveling enemy is fine). (Other sealed rings get
 	# reduced decay via cur_decay, but no replenish.) While below full, moon-motes get sucked into
 	# the core as pure visual fluff — fill is the rate.
-	if (current_ring == 0 or sealed[current_ring]) and not moving and not core_under_attack():
+	if (current_ring == 0 or sealed[current_ring]) and not moving and not core_under_attack() and not fin:
 		core = minf(core_max_eff(), core + core_refill_rate * sim)
 		if core < core_max_eff():
 			refill_emit -= sim
@@ -991,15 +1021,15 @@ func _tick_play(sim: float) -> void:
 				var ea := angle + randf_range(-0.6, 0.6)                                   # spawn near the moon's orbit position
 				var er := randf_range(planet_draw_radius() + 20.0, display_radius)         # somewhere between the core and the ring
 				flying.append({ "start": ring_point(er, ea), "t": 0.0 })
-	# Death only when the planet's core is drained to nothing.
-	if core <= 0.0:
+	# Death only when the planet's core is drained to nothing (never during the escape).
+	if core <= 0.0 and not fin:
 		phase = "dead"
 		if dead_reason == "":
 			dead_reason = "THE PLANET'S CORE DIED"
 
 	# Back at the hub, no enemy ON the inner ring, and the core topped back off -> open the shop.
 	# (Enemies still flying inward no longer block it — only a latched one does.)
-	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack() and core >= core_cap:
+	if hub_pending and not shop_open and current_ring == 0 and not moving and not core_under_attack() and core >= core_cap and not fin:
 		hub_pending = false
 		open_upgrades()
 
@@ -1192,7 +1222,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		for h in finale_hit:
 			if (h.rect as Rect2).has_point(mp):
 				if h.action == "again":
-					reset()
+					MainMenu.skip_to_intro = true   # replay the menu->game moon-fall, landing on the start frame
+					get_tree().change_scene_to_file("res://MainMenu.tscn")
 				elif h.action == "menu":
 					get_tree().change_scene_to_file("res://MainMenu.tscn")
 				return
@@ -1405,58 +1436,46 @@ func _on_upgrade_closed() -> void:
 		start_finale()
 
 
-# Kick off the escape cinematic: lock the player out, set the speed floor, freeze the camera on the
-# outer ring, and clear the field so only the moon + rings + core remain to play out the ending.
+# Kick off the escape: lock the player out and stop enemies, but leave the rest of the game running
+# (Stardust, comets, lights keep spawning). The moon then spirals smoothly outward (see the finale
+# branch in _tick_play); _tick_finale handles only the camera and the world fade-out.
 func start_finale() -> void:
 	pending_finale = false
 	phase = "finale"
-	finale_time = game_time   # the run's completion time (game_time is frozen during the cinematic)
-	fin_stage = 0
-	fin_t = 0.0
-	finale_scale = 1.0
+	finale_time = game_time   # the run's completion time (game_time is frozen during the escape)
+	world_fade = 1.0
+	fin_radial_v = fin_spiral_rate   # initial outward speed; it accelerates from here
+	fin_past_outer = false
+	fin_slowing = false
+	angle = 0.0                       # ALWAYS start the escape from the RIGHTMOST point of the inner ring...
+	display_radius = ring_r(0)        # ...so the whole spiral plays out identically every time
 	moving = false
-	speed = fin_finale_speed   # always end at this speed, whatever the player was doing
-	view_scale = frame_scale(ring_r(2))   # frozen framing (the finale branch returns before the lerp)
-	lights.clear()
+	speed = fin_start_speed
+	enemy_active = false      # no more enemy waves
+	threats.clear()           # clear any in-flight enemies; the rest of the field keeps playing
+	lights.clear()            # no boost lights riding the spiral
 	spawning.clear()
-	threats.clear()
-	asteroids.clear()
-	materials.clear()
-	comet.clear()
+	view_scale = frame_scale(ring_r(0))   # start framed on the inner ring
 
 
-# The cinematic state machine (runs in place of _tick_play while phase == "finale").
+# Runs alongside _tick_play during the escape: drives the following camera and the world fade-out.
+# The spiral motion + speed ramp live in _tick_play's finale branch so the world keeps simulating.
 func _tick_finale(delta: float) -> void:
-	angle = wrapf(angle + (speed / maxf(1.0, display_radius)) * delta, -PI, PI)   # keep orbiting
-	# Trail the escape: drop a tail point each frame (ring tag irrelevant — draw uses pos directly).
-	comet.append({ "pos": display_radius * Vector2(cos(angle), sin(angle)), "life": tail_life, "cum": 0.0, "glide": true, "ring": -1 })
-	for cp in comet:
-		cp.life -= delta
-	while not comet.is_empty() and comet[0].life <= 0.0:
-		comet.pop_front()
-	fin_t += delta
-	match fin_stage:
-		0:   # glide out to the middle ring
-			var u := clampf(fin_t / maxf(0.01, fin_glide_time), 0.0, 1.0)
-			display_radius = lerpf(ring_r(0), ring_r(1), u)
-			if u >= 1.0:
-				fin_stage = 1
-				fin_t = 0.0
-		1:   # immediately glide out to the outer ring (no pause on the middle)
-			var u := clampf(fin_t / maxf(0.01, fin_glide_time), 0.0, 1.0)
-			display_radius = lerpf(ring_r(1), ring_r(2), u)
-			if u >= 1.0:
-				fin_stage = 2
-				fin_t = 0.0
-		2:   # leave space: drift outward while the rings/core shrink into the center
-			display_radius += fin_escape_rate * delta
-			finale_scale = clampf(1.0 - fin_t / maxf(0.01, fin_collapse_time), 0.0, 1.0)
-			if fin_t >= fin_collapse_time:
-				fin_stage = 3
-		3:   # done — the true ending
+	# Camera: stay centered on the system and frame whatever ring the moon is on — inner, then middle,
+	# then outer as it spirals — then keep zooming out smoothly past the outer ring.
+	cam_focus = Vector2.ZERO
+	cam_zoom = 1.0
+	view_scale = lerpf(view_scale, frame_scale(display_radius), clampf(3.0 * delta, 0.0, 1.0))
+	# Once the comet has slowed at the leftmost point, fade the whole world (rings/core/Stardust/
+	# comets/lights) to black — everything except the moon and its trail. When fully faded, show
+	# the victory screen.
+	if fin_slowing:
+		world_fade = maxf(0.0, world_fade - delta / maxf(0.01, fin_world_fade_time))
+		if world_fade <= 0.0:
 			phase = "won"
 			finale_won = true
-			finale_end_t = 0.0   # start the victory-screen fade-in from zero
+			finale_end_t = 0.0
+			finale_moon_from = screen_center() + moon_world() * view_scale   # where it glides FROM
 
 
 func show_hint(text: String, dur: float, col: Color) -> void:
@@ -1557,9 +1576,9 @@ func _draw() -> void:
 		if sealed[i]:
 			col = style.ring_sealed
 		if sealed[i]:
-			draw_glow_arc(c, ring_r(i) * z * finale_scale, 0.0, TAU, 96, col, style.ring_w_sealed)
+			draw_glow_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_sealed)
 		else:
-			draw_arc(c, ring_r(i) * z * finale_scale, 0.0, TAU, 96, col, style.ring_w_locked)
+			draw_arc(c, ring_r(i) * z, 0.0, TAU, 96, col, style.ring_w_locked)
 
 	# The comet tail: cyan particles the moon drops as it flies; they linger and fade.
 	for cp in comet:
@@ -1575,7 +1594,7 @@ func _draw() -> void:
 	# Core — a filled disc (no outline) whose color + emission ramp from the dead-core purple
 	# (low) up to the light's yellow (full), so it brightens/darkens with health. At launch it
 	# flares from dead → full (core_lit) so the menu's dead core comes alive instead of popping.
-	var pr := planet_draw_radius() * z * finale_scale   # shrinks to nothing during the finale collapse
+	var pr := planet_draw_radius() * z
 	# While charging a light, the core wobbles + dips a touch so the eye links drain → birth.
 	var core_c := c + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * core_charge * 4.0 * z
 	var energy := clampf(core / maxf(1.0, core_cap), 0.0, 1.0) * core_lit * (1.0 - 0.25 * core_charge)   # full health = bright yellow + emission
@@ -1630,7 +1649,7 @@ func _draw() -> void:
 		var hl: int = ast.hits_left
 		var ap := c + ring_point(ring_r(2), aa) * z
 		draw_point_glow(ap, asteroid_radius * 0.8 * z, style.asteroid)
-		dtext(font,ap + Vector2(-20, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.asteroid_text)
+		dtext(font,ap + Vector2(-40, -asteroid_radius * z - 4.0), str(hl), HORIZONTAL_ALIGNMENT_CENTER, 80, 16, style.asteroid_text)
 
 	# Threats (siphoners) — magenta cursor arrows pointing at the planet they hunt.
 	for tr in threats:
@@ -1650,7 +1669,7 @@ func _draw() -> void:
 			rad *= 1.0 + 0.18 * pulse
 		draw_cursor(tp, rad, toward, tcol)
 		var thp: int = tr.hp
-		dtext(font,tp + Vector2(-20, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 40, 16, style.threat_text)
+		dtext(font,tp + Vector2(-40, -rad - 6.0), str(thp), HORIZONTAL_ALIGNMENT_CENTER, 80, 16, style.threat_text)
 
 	# Lights in flight: a mote peels off the core surface and eases out to its gate spot,
 	# trailing a fading tendril back to the core (slow start → fast → abrupt stop at the ring).
@@ -1693,26 +1712,35 @@ func _draw() -> void:
 		var fr := 6.0 * z * (1.0 - 0.4 * fft)
 		draw_point_glow(c + wpos * z, fr, style.moon_slow.lerp(style.moon_fast, fft))
 
+	# Finale fade: once the moon leaves the outer ring, the whole world (everything drawn above —
+	# rings, core, Stardust, comets, lights, the tail) fades to black. Drawn here, before the moon,
+	# so only the moon survives the fade.
+	if world_fade < 1.0:
+		var vpf := get_viewport_rect().size
+		draw_rect(Rect2(0, 0, vpf.x, vpf.y), Color(0, 0, 0, 1.0 - world_fade))
+
 	# Moon (the comet head) — the same glowing point as the boost lights, but kept cyan.
 	# After a MISS it powers down: emissions cut for powerdown_dark, then ramp back to full.
-	var mpulse := 0.5 + 0.5 * sin(game_time * 4.0)
-	var moon_col := style.moon_slow.lerp(style.moon_fast, t)
-	var moon_pos := c + moon_world() * z
-	var emit := 1.0
-	if powerdown > 0.0:
-		var el := powerdown_time - powerdown   # seconds elapsed since the miss
-		emit = 0.0 if el < powerdown_dark else clampf((el - powerdown_dark) / maxf(0.01, powerdown_time - powerdown_dark), 0.0, 1.0)
-	var dim := moon_col
-	dim.a = 0.35   # a faint core dot so the moon never fully vanishes while powered down
-	draw_circle(moon_pos, moon_screen_size * 0.6, dim)   # constant screen size (not zoom-scaled)
-	if emit > 0.0:
-		var glow_col := moon_col
-		glow_col.a = moon_col.a * emit
-		draw_point_glow(moon_pos, moon_screen_size + 1.5 * mpulse, glow_col)
+	# On the victory screen the moon is drawn by _draw_finale_end instead (it glides to the period).
+	if not (phase == "won" and finale_won):
+		var mpulse := 0.5 + 0.5 * sin(game_time * 4.0)
+		var moon_col := style.moon_slow.lerp(style.moon_fast, t)
+		var moon_pos := c + moon_world() * z
+		var emit := 1.0
+		if powerdown > 0.0:
+			var el := powerdown_time - powerdown   # seconds elapsed since the miss
+			emit = 0.0 if el < powerdown_dark else clampf((el - powerdown_dark) / maxf(0.01, powerdown_time - powerdown_dark), 0.0, 1.0)
+		var dim := moon_col
+		dim.a = 0.35   # a faint core dot so the moon never fully vanishes while powered down
+		draw_circle(moon_pos, moon_screen_size * 0.6, dim)   # constant screen size (not zoom-scaled)
+		if emit > 0.0:
+			var glow_col := moon_col
+			glow_col.a = moon_col.a * emit
+			draw_point_glow(moon_pos, moon_screen_size + 1.5 * mpulse, glow_col)
 
 	for pu in popups:
 		var qa := clampf(pu.life * 1.6, 0.0, 1.0)
-		dtext(font, c + pu.pos * z + Vector2(-110, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 220, pu.size, Color(1, 1, 1, qa))
+		dtext(font, c + pu.pos * z + Vector2(-350, 0), pu.text, HORIZONTAL_ALIGNMENT_CENTER, 700, pu.size, Color(1, 1, 1, qa))
 
 	# Low-core danger vignette: edges darken as the core falls from core_low_frac toward death.
 	if phase == "play":
@@ -2094,7 +2122,20 @@ func _draw_finale_end(font: Font) -> void:
 	var a_stats := clampf((finale_end_t - 2.0 * step) / fin_fade, 0.0, 1.0)
 	var a_btns := clampf((finale_end_t - 3.0 * step) / fin_fade, 0.0, 1.0)
 
-	draw_string(font, Vector2(sc.x - 700, sc.y - 300), "Freedom at last ...", HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, Color(1, 1, 1, a_title))
+	# "Freedom at last" — the escaped moon glides in from where it left off and settles as the period,
+	# then bobs/floats like the main-menu moon.
+	var title := "Freedom at last"
+	var tw := font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 72).x
+	var moon_r := 12.0
+	var gap := 10.0
+	var tx := sc.x - (tw + gap + moon_r) * 0.5     # center the title + period together
+	var ty := sc.y - 300.0
+	draw_string(font, Vector2(tx, ty), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 72, Color(1, 1, 1, a_title))
+	var period := Vector2(tx + tw + gap + moon_r * 0.5, ty - moon_r * 0.6)
+	var bob := sin(finale_end_t * 1.3) * 5.0       # float like the main-menu moon
+	var settle := smoothstep(0.0, 1.0, clampf(finale_end_t / fin_fade, 0.0, 1.0))   # glide in over the title fade
+	var moon_pos: Vector2 = finale_moon_from.lerp(period, settle) + Vector2(0.0, bob * settle)
+	draw_point_glow(moon_pos, moon_r, style.moon_slow.lerp(style.moon_fast, 0.4))
 	if a_time > 0.0:
 		var secs := int(finale_time)
 		draw_string(font, Vector2(sc.x - 700, sc.y - 170), "Completion time:  %d:%02d" % [secs / 60, secs % 60], HORIZONTAL_ALIGNMENT_CENTER, 1400, 72, Color(cyan.r, cyan.g, cyan.b, a_time))
@@ -2109,20 +2150,23 @@ func _draw_finale_end(font: Font) -> void:
 		var bw := 320.0
 		var bh := 58.0
 		var bx := sc.x - bw * 0.5
-		var by := sc.y + 110.0
+		var by := sc.y + 190.0
 		var again := Rect2(bx, by, bw, bh)
 		var menu := Rect2(bx, by + bh + 18.0, bw, bh)
-		_draw_finale_button(font, again, "PLAY AGAIN", a_btns)
-		_draw_finale_button(font, menu, "MAIN MENU", a_btns)
+		var mp := get_viewport().get_mouse_position()
+		_draw_finale_button(font, again, "PLAY AGAIN", a_btns, again.has_point(mp))
+		_draw_finale_button(font, menu, "MAIN MENU", a_btns, menu.has_point(mp))
 		finale_hit.append({ "rect": again, "action": "again" })
 		finale_hit.append({ "rect": menu, "action": "menu" })
 
 
-func _draw_finale_button(font: Font, r: Rect2, label: String, a: float) -> void:
-	draw_rect(r, Color(0.12, 0.14, 0.20, 0.95 * a))
+func _draw_finale_button(font: Font, r: Rect2, label: String, a: float, hover: bool) -> void:
+	var bg := Color(0.20, 0.27, 0.38, 0.98 * a) if hover else Color(0.12, 0.14, 0.20, 0.95 * a)
+	draw_rect(r, bg)
 	var bc: Color = style.banner_pause
-	draw_rect(r, Color(bc.r, bc.g, bc.b, a), false, 2.0)   # cyan border
-	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, Color(0.92, 0.95, 1.0, a))
+	draw_rect(r, Color(bc.r, bc.g, bc.b, a), false, 3.0 if hover else 2.0)   # cyan border, thicker on hover
+	var tcol := Color(1, 1, 1, a) if hover else Color(0.92, 0.95, 1.0, a)
+	draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 9.0), label, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 26, tcol)
 
 
 # "Are you sure?" overlay shown when R is pressed mid-run (Pleenko-style restart confirm).
