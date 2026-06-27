@@ -63,6 +63,17 @@ if [ "$PUSH" -eq 0 ]; then
     exit 0
 fi
 
+# ── Safety: never ship a debug build ───────────────────────────────────────
+# debug_start is an @export, so it can be true via Game.gd's default OR a
+# Game.tscn scene override. Refuse to upload if either turns it on.
+if grep -Eq 'debug_start[[:space:]]*:?=[[:space:]]*true' Game.gd Game.tscn; then
+    echo "❌ Refusing to push: debug_start is set to true."
+    echo "   Turn it off before shipping:"
+    grep -EnH 'debug_start[[:space:]]*:?=[[:space:]]*true' Game.gd Game.tscn
+    echo "   (Build is saved in builds/web/. Re-run after disabling.)"
+    exit 1
+fi
+
 # ── Push to itch via butler ────────────────────────────────────────────────
 if [[ "$ITCH_USER" == "REPLACE_ME" || "$GAME_SLUG" == "REPLACE_ME" ]]; then
     echo "❌ ITCH_USER / GAME_SLUG not set. Edit the CONFIG block at the top of build.sh,"
