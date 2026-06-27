@@ -44,6 +44,7 @@ const LOGO_MARGIN := 64.0           # px from the bottom-right corner
 const CREDITS_SECTIONS := [
 	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Durrant (8-Bit Curls)"],
 	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumoterris)"],
+	["CAPSULE ART", "Dane Durrant"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
 	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
 ]

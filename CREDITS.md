@@ -14,6 +14,9 @@ Assets not made by me — must be reproduced in the itch.io game description (ja
 - In-game theme "Magic Space" (`assets/sound/magic space.mp3`) — **CodeManu**, OpenGameArt.org,
   **CC0 / Public Domain**. <https://opengameart.org/content/magic-space>
 
+## Capsule art
+- Dane Durrant
+
 ## Playtesting
 - Dane Durrant
 - Joshua Taylor (lumoterris)
