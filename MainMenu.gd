@@ -1,4 +1,5 @@
 extends Node2D
+class_name MainMenu
 # Main menu — its OWN scene (project main_scene). PLAY loads Game.tscn; SETTINGS opens a
 # volume panel. Drawn to feel like the game: same VisualStyle palette, the neon grid (here
 # zoomed-in so only a "tiny piece" shows = big cells), and a glowing hero moon — the object
@@ -31,14 +32,29 @@ var time := 0.0
 var volume := DEFAULT_VOLUME
 var state := "menu"                 # menu | intro
 var intro_t := 0.0
+# Set by the victory screen's "Play again" so the menu skips straight into the intro -> Game.tscn,
+# landing on the same first frame a normal PLAY would.
+static var skip_to_intro := false
 
 const LOGO_W := 300.0               # bottom-right brand mark width (px); height follows the art's aspect
 const LOGO_MARGIN := 64.0           # px from the bottom-right corner
 
+# Jam rule: credit everything you didn't make (also tracked in CREDITS.md → itch description).
+# Each entry is [SECTION HEADER (caps), body]. The infinity icon still needs a source.
+const CREDITS_SECTIONS := [
+	["PROGRAMMING, GRAPHICS & DESIGN", "Kimberly Brown (8-bit Curls)"],
+	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumoterris)"],
+	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
+	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
+]
+const CREDITS_FOOTER := "Made for the Juniper Dev game jam with Godot 4.6"
+
 var _ui: CanvasLayer
 var _title: Label
 var _menu_box: Control
+var _play_btn: Button
 var _settings_box: Control
+var _credits_box: Control
 var _logo: TextureRect
 var _pct_label: Label
 var _music: AudioStreamPlayer
@@ -53,6 +69,9 @@ func _ready() -> void:
 	_set_volume(volume)
 	_build_music()
 	_build_ui()
+	if skip_to_intro:
+		skip_to_intro = false
+		_on_play()   # "Play again" -> run the same moon-fall transition straight into a new game
 
 
 func _process(delta: float) -> void:
@@ -263,10 +282,14 @@ func _build_ui() -> void:
 	vb.add_theme_constant_override("separation", 20)
 	var play_btn := _make_button("PLAY")
 	play_btn.pressed.connect(_on_play)
+	_play_btn = play_btn
 	var settings_btn := _make_button("SETTINGS")
 	settings_btn.pressed.connect(_on_settings)
+	var credits_btn := _make_button("CREDITS")
+	credits_btn.pressed.connect(_on_credits)
 	vb.add_child(play_btn)
 	vb.add_child(settings_btn)
+	vb.add_child(credits_btn)
 	_menu_box.add_child(vb)
 	_ui.add_child(_menu_box)
 
@@ -305,6 +328,32 @@ func _build_ui() -> void:
 	_settings_box.visible = false
 	_ui.add_child(_settings_box)
 
+	# Credits panel, dead-center, hidden until CREDITS pressed.
+	_credits_box = _make_center()
+	var cpanel := PanelContainer.new()
+	cpanel.add_theme_stylebox_override("panel", _sb(Color(0.08, 0.09, 0.14, 0.96), style.moon_slow))
+	var cv := VBoxContainer.new()
+	cv.add_theme_constant_override("separation", 20)
+	cv.custom_minimum_size = Vector2(760, 0)
+	cv.add_child(_make_label("CREDITS", 46))
+	# Each section: a caps header (cyan accent) tight above its body, grouped in its own VBox.
+	for sec in CREDITS_SECTIONS:
+		var sv := VBoxContainer.new()
+		sv.add_theme_constant_override("separation", 4)
+		var head := _make_label(sec[0], 30)
+		head.add_theme_color_override("font_color", style.moon_slow)
+		sv.add_child(head)
+		sv.add_child(_make_label(sec[1], 26))
+		cv.add_child(sv)
+	cv.add_child(_make_label(CREDITS_FOOTER, 24))
+	var credits_back := _make_button("BACK")
+	credits_back.pressed.connect(_on_credits_back)
+	cv.add_child(credits_back)
+	cpanel.add_child(cv)
+	_credits_box.add_child(cpanel)
+	_credits_box.visible = false
+	_ui.add_child(_credits_box)
+
 	# 8-bit Curls brand mark, pinned to the bottom-right corner.
 	_logo = TextureRect.new()
 	_logo.texture = load("res://assets/icons/8bit-curls-logo-white.png")
@@ -319,6 +368,9 @@ func _build_ui() -> void:
 	_logo.offset_right = -LOGO_MARGIN
 	_logo.offset_bottom = -LOGO_MARGIN
 	_ui.add_child(_logo)
+
+	# Focus PLAY so the menu is keyboard-navigable from launch (Space/Enter activates, arrows move).
+	_play_btn.grab_focus()
 
 
 func _make_center() -> Control:
@@ -352,7 +404,8 @@ func _make_button(text: String) -> Button:
 	b.add_theme_stylebox_override("normal", _sb(base, border))
 	b.add_theme_stylebox_override("hover", _sb(base.lightened(0.10), border.lightened(0.15)))
 	b.add_theme_stylebox_override("pressed", _sb(base.darkened(0.10), border))
-	b.add_theme_stylebox_override("focus", _sb(base, border))
+	# Focus reads like hover so keyboard navigation shows which button is selected.
+	b.add_theme_stylebox_override("focus", _sb(base.lightened(0.10), border.lightened(0.15)))
 	return b
 
 
@@ -389,6 +442,18 @@ func _on_settings() -> void:
 func _on_back() -> void:
 	_settings_box.visible = false
 	_menu_box.visible = true
+	_play_btn.grab_focus()
+
+
+func _on_credits() -> void:
+	_menu_box.visible = false
+	_credits_box.visible = true
+
+
+func _on_credits_back() -> void:
+	_credits_box.visible = false
+	_menu_box.visible = true
+	_play_btn.grab_focus()
 
 
 func _on_volume_changed(v: float) -> void:
