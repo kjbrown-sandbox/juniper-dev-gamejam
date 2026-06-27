@@ -18,8 +18,9 @@ Assets not made by me — must be reproduced in the itch.io game description (ja
 
 ## Sound effects
 
-- Gameplay & UI SFX (`assets/sound/sfx/`) — **"Pixel Combat" by Helton Yan**.
-  <!-- TODO: confirm the exact license + required attribution string for this pack and paste it here. -->
+- Gameplay & UI SFX (`assets/sound/sfx/`) — **"Pixel Combat" by Helton Yan**, **CC BY 4.0**.
+  Source: <https://heltonyan.itch.io/pixelcombat> · License: <https://creativecommons.org/licenses/by/4.0/>
+  Changes: individual sounds were selected/renamed and adjusted in-engine (pitch + volume).
 
 ## Capsule art
 

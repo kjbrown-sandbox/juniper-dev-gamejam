@@ -46,7 +46,7 @@ const CREDITS_SECTIONS := [
 	["PLAYTESTING", "Dane Durrant\nJoshua Taylor (lumosterris)"],
 	["CAPSULE ART", "Dane Durrant"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
-	["SOUND EFFECTS", "\"Pixel Combat\" — Helton Yan"],
+	["SOUND EFFECTS", "\"Pixel Combat\" — Helton Yan (CC-BY 4.0)\nheltonyan.itch.io/pixelcombat"],
 	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
 ]
 const CREDITS_FOOTER := "Made for the Juniper Dev game jam with Godot 4.6"
