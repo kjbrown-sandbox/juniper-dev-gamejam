@@ -19,9 +19,11 @@ Sfx="*res://Sfx.gd"
 [application]
 
 config/name="JuniperGameJam"
-run/main_scene="res://MainMenu.tscn"
+run/main_scene="res://SplashScreen.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
+boot_splash/image="res://loading_splash.png"
+boot_splash/bg_color=Color(0.050980, 0.019608, 0.129412, 1)
 
 [display]
 
