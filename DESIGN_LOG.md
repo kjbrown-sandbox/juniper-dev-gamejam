@@ -321,3 +321,21 @@ The core's role (fuels lights, refills at home) was invisible at both ends. Made
   buses themselves — **session-only, no save file**.
 - Popup works while paused because the game never truly pauses the SceneTree (`paused` is a
   plain flag), so the Controls keep taking mouse input.
+
+## Web audio fix — buses, AudioContext resume (2026-06-27)
+
+Symptom: zero sound in the browser (fine in the editor). Two stacked causes, both now fixed:
+
+1. **Runtime `AudioServer.add_bus()` silently kills ALL web audio in Godot 4.6.** The audio-controls
+   feature created the Music/SFX buses at runtime (`Sfx._ensure_buses`, `Game._setup_music_bus`),
+   which muted everything on web. Fix: buses now live in **`default_bus_layout.tres`** (loaded at
+   startup; referenced in `project.godot [audio]`), and the code only ever looks them up with
+   `get_bus_index()` — never creates them. "NEVER add_bus()" tripwire comments left at the old sites.
+2. **AudioContext never resumed** (browser autoplay). Added Pleenko's resume patch via the export's
+   `html/head_include` — it wraps `window.AudioContext` and resumes on the first click/key/touch.
+   Also: menu music no longer `play()`s against the suspended context at startup; it starts on the
+   first gesture (`MainMenu._build_music` is web-gated).
+
+Caveats carried forward: **bus effects are native-only** (the pause low-pass muffle does nothing on
+web — the volume dip still works). **Web audio fails silently — always test by listening**, via
+`./build.sh --serve` (serves builds/web with COOP/COEP headers + opens the browser).

@@ -333,22 +333,17 @@ func _ready() -> void:
 	reset()
 
 
-# Route in-game music through its own "Music" bus (a child of Master) carrying a low-pass filter.
-# Disabled normally; flipped on while paused so the track sounds muffled — as if heard through a
-# wall — rather than just quieter. (AudioServer buses persist across scene reloads, so reuse one
-# if it already exists from a previous run.)
+# Route in-game music through the "Music" bus (defined in default_bus_layout.tres, sending to
+# Master, carrying a low-pass filter). The filter is disabled normally; flipped on while paused so
+# the track sounds muffled — as if heard through a wall — rather than just quieter.
+# NEVER AudioServer.add_bus() here: creating buses at runtime silently kills ALL web audio in
+# Godot 4.6. The bus already exists from the startup layout; we just point the player at it.
 func _setup_music_bus() -> void:
 	var idx := AudioServer.get_bus_index("Music")
-	if idx == -1:
-		idx = AudioServer.bus_count
-		AudioServer.add_bus(idx)
-		AudioServer.set_bus_name(idx, "Music")
-		AudioServer.set_bus_send(idx, "Master")
-		AudioServer.add_bus_effect(idx, AudioEffectLowPassFilter.new())
-		idx = AudioServer.get_bus_index("Music")
-	var lpf := AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
-	if lpf:
-		lpf.cutoff_hz = 900.0   # gentle muffle: higher cutoff = clearer (set each setup so reloads update)
+	if idx >= 0:
+		var lpf := AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
+		if lpf:
+			lpf.cutoff_hz = 900.0   # native-only muffle (bus effects are inert on web)
 	music.bus = "Music"
 	_set_music_muffled(false)
 

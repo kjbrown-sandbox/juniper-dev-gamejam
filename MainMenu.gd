@@ -240,9 +240,13 @@ func _build_music() -> void:
 			(stream as AudioStreamMP3).loop = true
 		_music.stream = stream
 	add_child(_music)
-	# Start as soon as the menu launches. On web the browser keeps audio suspended until the
-	# first user gesture, then auto-resumes this stream; _input() is a belt-and-suspenders retry.
-	_music.play()
+	# Browsers block audio until a user gesture. Starting the stream now — against a still-suspended
+	# AudioContext — leaves it stuck "playing" but silent, and then the _input() gesture retry no-ops
+	# (it sees _music.playing == true) so it never restarts against the live context = permanent
+	# silence. So on web we DON'T start here; the first click/keypress in _input() kicks it off.
+	# Desktop has no autoplay policy, so start immediately there.
+	if not OS.has_feature("web"):
+		_music.play()
 
 
 func _start_music() -> void:
@@ -317,17 +321,33 @@ func _build_ui() -> void:
 	cpanel.add_theme_stylebox_override("panel", _sb(Color(0.08, 0.09, 0.14, 0.96), style.moon_slow))
 	var cv := VBoxContainer.new()
 	cv.add_theme_constant_override("separation", 20)
-	cv.custom_minimum_size = Vector2(760, 0)
+	cv.custom_minimum_size = Vector2(1040, 0)
 	cv.add_child(_make_label("CREDITS", 46))
-	# Each section: a caps header (cyan accent) tight above its body, grouped in its own VBox.
-	for sec in CREDITS_SECTIONS:
-		var sv := VBoxContainer.new()
-		sv.add_theme_constant_override("separation", 4)
-		var head := _make_label(sec[0], 30)
-		head.add_theme_color_override("font_color", style.moon_slow)
-		sv.add_child(head)
-		sv.add_child(_make_label(sec[1], 26))
-		cv.add_child(sv)
+	# Sections laid out in two columns, filled column-major so each column reads
+	# top-to-bottom like a printed credits list. Each section: a caps header
+	# (cyan accent) tight above its body, grouped in its own VBox.
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_theme_constant_override("h_separation", 64)
+	grid.add_theme_constant_override("v_separation", 20)
+	var rows := (CREDITS_SECTIONS.size() + 1) / 2
+	for r in rows:
+		for c in 2:
+			var idx := c * rows + r
+			if idx >= CREDITS_SECTIONS.size():
+				grid.add_child(Control.new())  # keep the grid aligned on an odd count
+				continue
+			var sec = CREDITS_SECTIONS[idx]
+			var sv := VBoxContainer.new()
+			sv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			sv.add_theme_constant_override("separation", 4)
+			var head := _make_label(sec[0], 30)
+			head.add_theme_color_override("font_color", style.moon_slow)
+			sv.add_child(head)
+			sv.add_child(_make_label(sec[1], 26))
+			grid.add_child(sv)
+	cv.add_child(grid)
 	cv.add_child(_make_label(CREDITS_FOOTER, 24))
 	var credits_back := _make_button("BACK")
 	credits_back.pressed.connect(_on_credits_back)
