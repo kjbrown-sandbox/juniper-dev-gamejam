@@ -342,8 +342,11 @@ func _build_ui() -> void:
 			sv.add_theme_constant_override("separation", 4)
 			var head := _make_label(sec[0], 30)
 			head.add_theme_color_override("font_color", style.moon_slow)
+			head.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 			sv.add_child(head)
-			sv.add_child(_make_label(sec[1], 26))
+			var body := _make_label(sec[1], 26)
+			body.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+			sv.add_child(body)
 			grid.add_child(sv)
 	cv.add_child(grid)
 	cv.add_child(_make_label(CREDITS_FOOTER, 24))
