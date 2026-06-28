@@ -240,13 +240,11 @@ func _build_music() -> void:
 			(stream as AudioStreamMP3).loop = true
 		_music.stream = stream
 	add_child(_music)
-	# Browsers block audio until a user gesture. Starting the stream now — against a still-suspended
-	# AudioContext — leaves it stuck "playing" but silent, and then the _input() gesture retry no-ops
-	# (it sees _music.playing == true) so it never restarts against the live context = permanent
-	# silence. So on web we DON'T start here; the first click/keypress in _input() kicks it off.
-	# Desktop has no autoplay policy, so start immediately there.
-	if not OS.has_feature("web"):
-		_music.play()
+	# Start immediately. The browser keeps the AudioContext suspended until the first user gesture,
+	# but the head_include resume patch (see export_presets.cfg) resumes it on that first click/key —
+	# at which point this already-queued stream becomes audible right away, no replay needed. The
+	# _input() call below is a belt-and-suspenders retry in case the stream wasn't playing yet.
+	_music.play()
 
 
 func _start_music() -> void:
