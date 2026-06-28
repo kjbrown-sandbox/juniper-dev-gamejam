@@ -11,8 +11,9 @@ extends Node
 #   Sfx.loop("beam")               start a sustained loop (idempotent; needs loop set on import)
 #   Sfx.stop("beam")               stop that loop
 #
-# Volume rides the Master bus, which MainMenu's volume slider already drives (persists across
-# the scene cut into the game).
+# Buses (set up once in _ready, persist for the session): SFX rides its own "SFX" bus and music
+# rides "Music"; both feed Master. The master volume slider drives Master, and the Music/SFX
+# toggles mute their bus — so the two are controllable independently.
 
 const DIR := "res://assets/sound/sfx/"
 const EXTS := ["wav", "ogg", "mp3"]
@@ -25,11 +26,32 @@ var _loops := {}          # name -> persistent AudioStreamPlayer (one per loopin
 
 
 func _ready() -> void:
+	_ensure_buses()
 	for i in POOL:
 		var p := AudioStreamPlayer.new()
-		p.bus = "Master"
+		p.bus = "SFX"
 		add_child(p)
 		_pool.append(p)
+
+
+# Create the "Music" and "SFX" buses (both sending to Master) if they don't exist yet. This runs
+# from the autoload so the buses are present app-wide — the menu's audio toggles need them before
+# Game ever loads. Idempotent: AudioServer buses persist across scene reloads, so reuse any that
+# already exist. The Music bus carries a (disabled) low-pass filter that Game toggles to muffle the
+# track while paused — see Game._set_music_muffled().
+func _ensure_buses() -> void:
+	if AudioServer.get_bus_index("Music") == -1:
+		var idx := AudioServer.bus_count
+		AudioServer.add_bus(idx)
+		AudioServer.set_bus_name(idx, "Music")
+		AudioServer.set_bus_send(idx, "Master")
+		AudioServer.add_bus_effect(idx, AudioEffectLowPassFilter.new())
+		AudioServer.set_bus_effect_enabled(idx, 0, false)
+	if AudioServer.get_bus_index("SFX") == -1:
+		var idx := AudioServer.bus_count
+		AudioServer.add_bus(idx)
+		AudioServer.set_bus_name(idx, "SFX")
+		AudioServer.set_bus_send(idx, "Master")
 
 
 # Resolve a name to its stream, trying each extension once. Result (incl. "no file") is cached.
@@ -70,7 +92,7 @@ func loop(name: String) -> void:
 		if s == null:
 			return
 		p = AudioStreamPlayer.new()
-		p.bus = "Master"
+		p.bus = "SFX"
 		p.stream = s
 		add_child(p)
 		_loops[name] = p

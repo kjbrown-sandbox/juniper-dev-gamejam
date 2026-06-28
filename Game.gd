@@ -18,6 +18,8 @@ extends Node2D
 # recolored (via Icon.recolored) from its source green to the hint text color.
 var music: AudioStreamPlayer
 var arrow_tex: Texture2D
+var audio_on_tex: Texture2D    # speaker glyphs for the corner volume button (recolored once in _ready)
+var audio_off_tex: Texture2D
 
 # SPACE light-hit collision: a circle at the moon head overlaps a per-light Area2D pool. They live
 # in unzoomed world space (the renderer applies the camera manually in _draw), so overlap is in
@@ -140,7 +142,7 @@ var light_areas: Array = []   # parallel to `lights`, one Area2D each
 @export var fin_hold := 0.5             # victory screen: pause after each element before the next starts
 
 # ── Debug ──────────────────────────────────────────────────
-@export var debug_start := true         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
+@export var debug_start := false         # TESTING: start with every upgrade + two rings sealed. TURN OFF before shipping.
 
 # ── State ──────────────────────────────────────────────────
 var phase := "play"      # play | dead | won | finale (the escape cinematic)
@@ -160,6 +162,9 @@ var _end_ui: CanvasLayer        # victory-screen buttons live here (real Buttons
 var _end_holder: Control        # parent Control whose modulate drives the staged fade-in
 var _end_again: Button
 var _end_menu: Button
+var _vol_layer: CanvasLayer      # the corner volume button's hover popup (slider + Music/SFX toggles)
+var _vol_pop: Control
+var _vol_pop_open := false
 var _core_bought_in_shop := false   # a Core upgrade was bought this shop visit -> top core off on close
 # Run totals for the victory screen (cumulative, not the spendable wallets).
 var total_stardust := 0
@@ -223,6 +228,7 @@ var hub_pending := false      # arrived at hub; shop opens once enemies are clea
 var asteroid_respawn := 0.0
 var square_respawn := 0.0
 var paused := false
+var hud_hidden := false      # set true to hide the whole HUD overlay (counters, SPD/TIME, corner buttons) for clean captures
 var confirm_reset := false   # R opens an "are you sure?" overlay before actually resetting
 var confirm_hit: Array = []  # clickable Yes/No regions in the confirm overlay
 var space_cd := 0.0
@@ -282,6 +288,10 @@ func _ready() -> void:
 	_setup_music_bus()   # route music through a low-pass "Music" bus so we can muffle it on pause
 	# Recolor the green arrow art to the hint text color for the ring-nav prompt.
 	arrow_tex = Icon.recolored(load("res://assets/icons/arrows.png"), style.banner_info)
+	# Speaker glyphs for the corner volume button, recolored once (Icon.recolored is a per-pixel loop).
+	audio_on_tex = Icon.recolored(load("res://assets/icons/audioOn.png"), style.banner_pause)
+	audio_off_tex = Icon.recolored(load("res://assets/icons/audioOff.png"), style.banner_pause)
+	_build_volume_popup()
 	# Capture export bases BEFORE the first reset, so editing an @export actually takes effect
 	# (reset() restores from here instead of hardcoded duplicates).
 	_base = {
@@ -411,6 +421,41 @@ func _end_sb(bg: Color, border: Color, bw: int) -> StyleBoxFlat:
 	s.set_corner_radius_all(4)
 	s.set_content_margin_all(10)
 	return s
+
+
+# ── Volume popup (real Control nodes) ──────────────────────
+# The corner volume button is hand-drawn next to the pause icon (see _draw_hud); hovering it reveals
+# this panel — the SAME AudioControls widget the main-menu settings page uses. Built once, hidden;
+# shown/positioned by _update_volume_popup(). (The game never truly pauses the SceneTree — "paused"
+# is a plain flag — so these Controls keep taking mouse input while paused, no process_mode needed.)
+func _build_volume_popup() -> void:
+	_vol_layer = CanvasLayer.new()
+	_vol_layer.layer = 10
+	add_child(_vol_layer)
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _end_sb(Color(0.08, 0.09, 0.14, 0.96), style.banner_pause, 2))
+	panel.add_child(AudioControls.build(style, ui_font))
+	_vol_pop = panel
+	_vol_pop.visible = false
+	_vol_layer.add_child(_vol_pop)
+
+
+# Show the popup while the cursor is over the volume button OR the popup itself (grown a touch so the
+# gap between them doesn't make it flicker), and keep it pinned under the button's row. Force it shut
+# whenever the button isn't drawn (shop/reset overlay, or not actively playing).
+func _update_volume_popup() -> void:
+	if _vol_pop == null:
+		return
+	var want := false
+	if phase == "play" and started and not shop_open and not confirm_reset:
+		var mp := get_viewport().get_mouse_position()
+		want = vol_btn_rect().has_point(mp) or (_vol_pop_open and _vol_pop.get_global_rect().grow(14.0).has_point(mp))
+		if want:
+			var vp := get_viewport_rect().size
+			_vol_pop.position = Vector2(vp.x - 26.0 - _vol_pop.size.x, vol_btn_rect().end.y + 6.0)
+	if want != _vol_pop_open:
+		_vol_pop_open = want
+		_vol_pop.visible = want
 
 
 # Reveal + fade the victory buttons in sync with the staged end-screen schedule (same `a_btns` curve
@@ -896,6 +941,7 @@ func try_seal() -> void:
 
 # ── Sim ────────────────────────────────────────────────────
 func _process(delta: float) -> void:
+	_update_volume_popup()   # hover-driven; runs every frame (incl. while paused) before the sim gates
 	if phase == "won" or phase == "dead":
 		if finale_won:
 			finale_end_t += delta   # drives the staged fade-in of the victory screen
@@ -1433,6 +1479,12 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Upgrade screen is keyboard-driven (UpgradeMenu); swallow clicks while it's up.
 	if shop_open:
+		return
+
+	# Volume button (left of pause): toggle master mute = all sound on/off. The hover popup's slider
+	# and toggles are real Controls, so they swallow their own clicks before this ever fires.
+	if phase == "play" and started and vol_btn_rect().has_point(mp):
+		AudioServer.set_bus_mute(0, not AudioServer.is_bus_mute(0))
 		return
 
 	# Pause toggle via the corner icon (Pleenko-style clickable pause button).
@@ -2230,6 +2282,8 @@ func _draw_vignette(vp: Vector2, strength: float) -> void:
 
 
 func _draw_hud(font: Font) -> void:
+	if hud_hidden:
+		return   # clean-capture mode: suppress all overlay chrome (toggle with H)
 	var vp := get_viewport_rect().size
 	# Dev readout (bottom-left): live speed + elapsed game time.
 	dtext(font, Vector2(22, vp.y - 26), "SPD %d   TIME %.1f" % [int(speed), game_time], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, style.hud_text)
@@ -2259,6 +2313,15 @@ func _draw_hud(font: Font) -> void:
 			draw_colored_polygon(PackedVector2Array([bc + Vector2(-ps * 0.7, -ps), bc + Vector2(ps, 0), bc + Vector2(-ps * 0.7, ps)]), style.banner_pause)
 		else:
 			draw_pause_bars(bc, r.size.x * 0.26, style.banner_pause)
+
+		# Clickable volume button (left of pause). Click toggles all sound; hover reveals the popup.
+		# Speaker-off glyph when master is muted OR the slider's dragged to silence.
+		var vr := vol_btn_rect()
+		draw_rect(vr, Color(0.1, 0.06, 0.18, 0.5))
+		var muted := AudioServer.is_bus_mute(0) or AudioServer.get_bus_volume_db(0) <= -79.0
+		var vtex := audio_off_tex if muted else audio_on_tex
+		var isz := vr.size.x * 0.58
+		draw_texture_rect(vtex, Rect2(vr.position + (vr.size - Vector2(isz, isz)) * 0.5, Vector2(isz, isz)), false)
 
 	var sc := screen_center()
 	# Centered banners — CENTER alignment in a wide box so they stay centered at any text scale.
@@ -2338,6 +2401,12 @@ func pause_btn_rect() -> Rect2:
 	var vp := get_viewport_rect().size
 	var s := 46.0
 	return Rect2(vp.x - s - 26.0, 26.0, s, s)
+
+
+# The volume button sits one button-width (+12px gap) to the left of the pause button.
+func vol_btn_rect() -> Rect2:
+	var r := pause_btn_rect()
+	return Rect2(r.position.x - r.size.x - 12.0, r.position.y, r.size.x, r.size.y)
 
 
 # The true-ending victory screen: large white title, run stats, and two stacked buttons. No game UI.

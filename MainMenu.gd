@@ -47,7 +47,7 @@ const CREDITS_SECTIONS := [
 	["CAPSULE ART", "Dane Durrant"],
 	["MUSIC", "\"Space Sprinkles\" — Matthew Pablo (CC-BY 3.0)\n\"Magic Space\" — CodeManu (CC0)\nfrom OpenGameArt.org"],
 	["SOUND EFFECTS", "\"Pixel Combat\" — Helton Yan (CC-BY 4.0)\nheltonyan.itch.io/pixelcombat"],
-	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)"],
+	["ICONS", "Arrows — hqrloveq (Flaticon)\nInfinity — Freepik (Flaticon)\nSpeaker — Kenney (CC0)"],
 ]
 const CREDITS_FOOTER := "Made for the Juniper Dev game jam with Godot 4.6"
 
@@ -58,7 +58,6 @@ var _play_btn: Button
 var _settings_box: Control
 var _credits_box: Control
 var _logo: TextureRect
-var _pct_label: Label
 var _music: AudioStreamPlayer
 var _music_started := false
 
@@ -233,7 +232,7 @@ func _glow_circle(pos: Vector2, r: float, col: Color) -> void:
 # ── Audio ──────────────────────────────────────────────────
 func _build_music() -> void:
 	_music = AudioStreamPlayer.new()
-	_music.bus = "Master"
+	_music.bus = "Music"   # so the Music toggle silences the menu theme too (intro fade rides volume_db)
 	# Menu theme = "Space Sprinkles" (in-game "magic space" is triggered from Game.gd instead).
 	var stream: AudioStream = load("res://assets/sound/Space Sprinkles.mp3")
 	if stream != null:
@@ -302,28 +301,10 @@ func _build_ui() -> void:
 	var pv := VBoxContainer.new()
 	pv.add_theme_constant_override("separation", 22)
 	pv.custom_minimum_size = Vector2(560, 0)
-	var vol_label := _make_label("VOLUME", 32)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 18)
-	var slider := HSlider.new()
-	slider.min_value = 0.0
-	slider.max_value = 100.0
-	slider.step = 1.0
-	slider.value = volume
-	slider.custom_minimum_size = Vector2(0, 44)
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	_style_slider(slider)
-	slider.value_changed.connect(_on_volume_changed)
-	_pct_label = _make_label("%d%%" % int(round(volume)), 28)
-	_pct_label.custom_minimum_size = Vector2(96, 0)
-	_pct_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(slider)
-	row.add_child(_pct_label)
+	# Volume slider + Music/SFX toggles — the same widget the in-game popup uses (AudioControls).
+	pv.add_child(AudioControls.build(style, ui_font))
 	var back_btn := _make_button("BACK")
 	back_btn.pressed.connect(_on_back)
-	pv.add_child(vol_label)
-	pv.add_child(row)
 	pv.add_child(back_btn)
 	panel.add_child(pv)
 	_settings_box.add_child(panel)
@@ -466,47 +447,3 @@ func _on_credits_back() -> void:
 	_credits_box.visible = false
 	_menu_box.visible = true
 	_play_btn.grab_focus()
-
-
-func _on_volume_changed(v: float) -> void:
-	# No sound here on purpose: value_changed fires once per pixel of slider travel, so a blip would
-	# machine-gun while dragging. The volume change is its own feedback.
-	_set_volume(v)
-	if _pct_label != null:
-		_pct_label.text = "%d%%" % int(round(v))
-
-
-# Cyan track + filled bar (same hue as everything else) and a grabber 2× the default size.
-func _style_slider(s: HSlider) -> void:
-	var track := StyleBoxFlat.new()
-	track.bg_color = Color(style.moon_slow.r, style.moon_slow.g, style.moon_slow.b, 0.55)
-	track.set_corner_radius_all(5)
-	track.content_margin_top = 5.0
-	track.content_margin_bottom = 5.0
-	s.add_theme_stylebox_override("slider", track)
-	var fill := StyleBoxFlat.new()
-	fill.bg_color = style.moon_slow
-	fill.set_corner_radius_all(5)
-	fill.content_margin_top = 5.0
-	fill.content_margin_bottom = 5.0
-	s.add_theme_stylebox_override("grabber_area", fill)
-	s.add_theme_stylebox_override("grabber_area_highlight", fill)
-	var grab := _make_grabber(34, style.moon_fast)
-	s.add_theme_icon_override("grabber", grab)
-	s.add_theme_icon_override("grabber_highlight", grab)
-	s.add_theme_icon_override("grabber_disabled", grab)
-
-
-func _make_grabber(diameter: int, col: Color) -> ImageTexture:
-	var img := Image.create(diameter, diameter, false, Image.FORMAT_RGBA8)
-	img.fill(Color(0, 0, 0, 0))
-	var rad := float(diameter) * 0.5
-	var ctr := Vector2(rad, rad)
-	for y in diameter:
-		for x in diameter:
-			var d := Vector2(x + 0.5, y + 0.5).distance_to(ctr)
-			if d <= rad:
-				var c := col
-				c.a = col.a * clampf(rad - d, 0.0, 1.0)   # 1px soft edge
-				img.set_pixelv(Vector2i(x, y), c)
-	return ImageTexture.create_from_image(img)

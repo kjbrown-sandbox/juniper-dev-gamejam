@@ -303,3 +303,21 @@ The core's role (fuels lights, refills at home) was invisible at both ends. Made
   2 HP / 0.75). Each difficulty tier (every full wave-count bump, `threat_spawn_count / 4`) adds
   **+1 HP and +0.5/s drain**; drain is now per-enemy (`t.drain`). Enemies also spawn a full
   `ring_gap` beyond the outer ring (was +80px) so they fly in from off-screen.
+
+## Audio controls — volume button + Music/SFX toggles (2026-06-27)
+
+- New **volume button** in the in-game HUD, one button-width left of the pause icon
+  (`Game.vol_btn_rect()`, drawn in `_draw_hud`). Click toggles **master mute** (all sound
+  on/off); the speaker glyph flips to the muted icon when muted OR the slider's at 0.
+  Icons: Kenney's `audioOn/audioOff.png` (CC0), recolored via `Icon.recolored`. Credited in
+  `CREDITS.md` + the in-game CREDITS screen.
+- **Hover popup** beneath the button: a master volume slider + **Music** and **SFX** labeled
+  toggles. Built from a new shared `AudioControls.gd` (`static build()`), so the popup and the
+  main-menu **settings page use the exact same widget**. The menu's old hand-rolled slider +
+  `_style_slider`/`_make_grabber` were moved into `AudioControls`.
+- **Buses:** `Sfx._ensure_buses()` now creates **Music** (with a disabled low-pass for the
+  pause-muffle) and **SFX** buses up front in the autoload, and routes all SFX players to **SFX**
+  (was Master). Master volume = the slider; Music/SFX toggles = bus mute. State lives in the
+  buses themselves — **session-only, no save file**.
+- Popup works while paused because the game never truly pauses the SceneTree (`paused` is a
+  plain flag), so the Controls keep taking mouse input.

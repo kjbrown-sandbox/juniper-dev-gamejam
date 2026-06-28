@@ -8,6 +8,8 @@ Assets not made by me — must be reproduced in the itch.io game description (ja
   <https://www.flaticon.com/free-icons/arrows>
 - Infinity icon (`assets/icons/infinity.png`) — Infinity icons created by **Freepik** — Flaticon.
   <https://www.flaticon.com/free-icons/infinity>
+- Speaker icons (`assets/icons/audioOn.png`, `assets/icons/audioOff.png`) — **Kenney**
+  (kenney.nl), **CC0 / Public Domain**. <https://kenney.nl/assets/game-icons>
 
 ## Music
 
